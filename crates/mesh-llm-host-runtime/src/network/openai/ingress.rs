@@ -5,6 +5,7 @@ use crate::mesh;
 use crate::network::affinity;
 use crate::network::openai::transport as proxy;
 use crate::network::router;
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 use mesh_mixture_of_agents as moa;
 
 enum AutoRouteResolution {
@@ -117,7 +118,8 @@ async fn handle_mesh_unload_request(
     if let Some(name) = request.model_name.as_ref() {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let _ = control_tx.send(api::RuntimeControlRequest::Unload {
-            target: name.clone(),
+            target: UnloadTarget::Model(name.clone()),
+            options: UnloadOptions::default(),
             resp: resp_tx,
         });
         send_runtime_control_response(

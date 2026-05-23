@@ -9,6 +9,8 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+scripts/check-sdk-contract.sh
+
 if [[ "${MESH_SWIFT_FULL_XCFRAMEWORK_SMOKE:-0}" == "1" ]]; then
     ./sdk/swift/scripts/build-xcframework.sh
 else

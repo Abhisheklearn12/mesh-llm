@@ -66,6 +66,11 @@ use crate::mesh;
 use crate::network::{affinity, nostr};
 use crate::plugin;
 use crate::runtime_data;
+use mesh_llm_node::serving::{
+    DevicePolicy as NodeDevicePolicy, LoadModelRequest, ServedModel, ServingController,
+    ServingError, ServingFuture, ServingModelState, ServingStatus, UnloadModelRequest,
+};
+use mesh_llm_types::models::capabilities::merge_name_signals;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -928,6 +933,159 @@ impl MeshApi {
         let mut inner = self.inner.lock().await;
         inner.runtime_data_producer.mark_status_dirty();
         inner.sse_clients.retain(|tx| !tx.is_closed());
+    }
+}
+
+impl ServingController for MeshApi {
+    fn load<'a>(&'a self, request: LoadModelRequest) -> ServingFuture<'a, ServedModel> {
+        Box::pin(async move {
+            let model_ref = request.model_ref;
+            if !matches!(request.device_policy, NodeDevicePolicy::Auto) {
+                return Err(anyhow::anyhow!(ServingError::UnsupportedDevicePolicy {
+                    policy: request.device_policy,
+                }));
+            }
+            let control_tx = self
+                .inner
+                .lock()
+                .await
+                .runtime_control
+                .clone()
+                .ok_or_else(|| runtime_unavailable("runtime control unavailable"))?;
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            control_tx
+                .send(RuntimeControlRequest::Load {
+                    spec: model_ref.clone(),
+                    resp: resp_tx,
+                })
+                .map_err(|_| runtime_unavailable("runtime control unavailable"))?;
+            let loaded = resp_rx
+                .await
+                .map_err(|_| runtime_unavailable("runtime control response dropped"))?
+                .map_err(|error| {
+                    anyhow::anyhow!(ServingError::LoadFailed {
+                        model_ref: model_ref.clone(),
+                        message: error.to_string(),
+                    })
+                })?;
+            let capabilities = infer_served_model_capabilities(&model_ref, &loaded.model);
+            Ok(ServedModel {
+                model_ref: loaded.model_ref,
+                model_id: loaded.model,
+                instance_id: Some(loaded.instance_id),
+                state: ServingModelState::Ready,
+                backend: loaded.backend,
+                capabilities,
+                context_length: loaded.context_length,
+                error: None,
+            })
+        })
+    }
+
+    fn unload<'a>(&'a self, request: UnloadModelRequest) -> ServingFuture<'a, ()> {
+        Box::pin(async move {
+            let control_tx = self
+                .inner
+                .lock()
+                .await
+                .runtime_control
+                .clone()
+                .ok_or_else(|| runtime_unavailable("runtime control unavailable"))?;
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let target = request.target;
+            control_tx
+                .send(RuntimeControlRequest::Unload {
+                    target: target.clone(),
+                    options: request.options,
+                    resp: resp_tx,
+                })
+                .map_err(|_| runtime_unavailable("runtime control unavailable"))?;
+            let _ = resp_rx
+                .await
+                .map_err(|_| runtime_unavailable("runtime control response dropped"))?
+                .map_err(|error| {
+                    anyhow::anyhow!(ServingError::UnloadFailed {
+                        target,
+                        message: error.to_string(),
+                    })
+                })?;
+            Ok(())
+        })
+    }
+
+    fn served_models<'a>(&'a self) -> ServingFuture<'a, Vec<ServedModel>> {
+        Box::pin(async move {
+            Ok(self
+                .runtime_status()
+                .await
+                .models
+                .into_iter()
+                .map(served_model_from_runtime_payload)
+                .collect())
+        })
+    }
+
+    fn status<'a>(&'a self) -> ServingFuture<'a, ServingStatus> {
+        Box::pin(async move {
+            let enabled = self.inner.lock().await.runtime_control.is_some();
+            let models = self
+                .runtime_status()
+                .await
+                .models
+                .into_iter()
+                .map(served_model_from_runtime_payload)
+                .collect();
+            Ok(ServingStatus { enabled, models })
+        })
+    }
+
+    fn set_device_policy<'a>(&'a self, policy: NodeDevicePolicy) -> ServingFuture<'a, ()> {
+        Box::pin(async move {
+            match policy {
+                NodeDevicePolicy::Auto => Ok(()),
+                policy => Err(anyhow::anyhow!(ServingError::UnsupportedDevicePolicy {
+                    policy,
+                })),
+            }
+        })
+    }
+}
+
+fn served_model_from_runtime_payload(model: RuntimeModelPayload) -> ServedModel {
+    let capabilities = infer_served_model_capabilities(&model.name, &model.name);
+    ServedModel {
+        model_ref: model.name.clone(),
+        model_id: model.name,
+        instance_id: model.instance_id,
+        state: serving_model_state_from_runtime_status(&model.status),
+        backend: Some(model.backend),
+        capabilities,
+        context_length: model.context_length,
+        error: None,
+    }
+}
+
+fn runtime_unavailable(message: impl Into<String>) -> anyhow::Error {
+    anyhow::anyhow!(ServingError::RuntimeUnavailable {
+        message: message.into(),
+    })
+}
+
+fn infer_served_model_capabilities(
+    model_ref: &str,
+    model_id: &str,
+) -> mesh_llm_node::models::ModelCapabilities {
+    merge_name_signals(Default::default(), &[model_ref, model_id]).normalize()
+}
+
+fn serving_model_state_from_runtime_status(status: &str) -> ServingModelState {
+    match status.to_ascii_lowercase().as_str() {
+        "loading" | "starting" => ServingModelState::Loading,
+        "ready" | "running" => ServingModelState::Ready,
+        "failed" | "error" => ServingModelState::Failed,
+        "unloading" | "stopping" => ServingModelState::Unloading,
+        "stopped" => ServingModelState::Stopped,
+        other => ServingModelState::Unknown(other.to_string()),
     }
 }
 

@@ -69,7 +69,7 @@ runs:
           echo "Unknown event type: ${{ inputs.event_name }}" >&2
           exit 1
         fi
-        
+
         cat /tmp/changed_files.txt
 
     - name: Run affected-crates.sh
@@ -82,7 +82,7 @@ runs:
         else
           cat /tmp/changed_files.txt | bash scripts/affected-crates.sh --stdin > /tmp/crates_output.json
         fi
-        
+
         cat /tmp/crates_output.json
 
     - name: Derive outputs
@@ -91,7 +91,7 @@ runs:
       run: |
         # Read the JSON output from affected-crates.sh
         CRATES_JSON=$(cat /tmp/crates_output.json)
-        
+
         # Extract fields from JSON
         AFFECTED_CRATES=$(echo "$CRATES_JSON" | jq -c '.affected // []')
         TEST_CRATES=$(echo "$CRATES_JSON" | jq -c '.test_crates // []')
@@ -104,10 +104,10 @@ runs:
         else
           CLIPPY_BATCHES=$(bash scripts/plan-clippy-batches.sh --crates-json "$AFFECTED_CRATES")
         fi
-        
+
         # Read changed files for docs_only and rust_changed logic
         CHANGED_FILES=$(cat /tmp/changed_files.txt | grep -v "^__force_all__$" || true)
-        
+
         # Determine docs_only: true if all_rust=false AND ui_changed=false AND all files match docs patterns
         DOCS_ONLY="false"
         if [[ "$ALL_RUST" == "false" ]] && [[ "$UI_CHANGED" == "false" ]]; then
@@ -119,7 +119,7 @@ runs:
             fi
           fi
         fi
-        
+
         # Determine rust_changed: true if all_rust=true OR affected_crates is non-empty
         RUST_CHANGED="false"
         if [[ "$ALL_RUST" == "true" ]]; then
@@ -149,7 +149,7 @@ runs:
           DIRECT_SDK_INPUTS=$(echo "$CHANGED_FILES" | grep -E '(^sdk/|^Package\.swift$|^scripts/ci-(native|kotlin|swift)-sdk-smoke\.sh$|^scripts/ci-sdk-fixture\.sh$|^\.github/workflows/sdk-smoke\.yml$)' || true)
           if [[ -n "$DIRECT_SDK_INPUTS" ]]; then
             SDK_SMOKE_REQUIRED="true"
-          elif echo "$AFFECTED_CRATES" | jq -e 'index("mesh-llm-client") or index("mesh-api") or index("mesh-api-ffi") or index("mesh-llm-protocol") or index("mesh-llm-routing") or index("mesh-llm-types")' >/dev/null; then
+          elif echo "$AFFECTED_CRATES" | jq -e 'index("mesh-llm-client") or index("mesh-llm-api-client") or index("mesh-llm-api-server") or index("mesh-llm-ffi") or index("mesh-llm-protocol") or index("mesh-llm-routing") or index("mesh-llm-types")' >/dev/null; then
             SDK_SMOKE_REQUIRED="true"
           fi
         fi

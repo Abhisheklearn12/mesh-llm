@@ -3,11 +3,11 @@ import XCTest
 
 final class EventStreamTests: XCTestCase {
     func testChatStreamEmitsCompletedEvent() async throws {
-        let client = MeshClient(inviteToken: InviteToken("test-token"), ownerKeypairBytesHex: makeOwnerKeypairBytesHex())
+        let node = try makeTestNode()
         let request = ChatRequest(model: "test", messages: [])
 
-        var events: [MeshEvent] = []
-        for try await event in client.chatStream(request) {
+        var events: [Event] = []
+        for try await event in node.inference.chatStream(request) {
             events.append(event)
         }
 
@@ -17,11 +17,11 @@ final class EventStreamTests: XCTestCase {
     }
 
     func testResponsesStreamEmitsCompletedEvent() async throws {
-        let client = MeshClient(inviteToken: InviteToken("test-token"), ownerKeypairBytesHex: makeOwnerKeypairBytesHex())
+        let node = try makeTestNode()
         let request = ResponsesRequest(model: "test", input: "hello")
 
-        var events: [MeshEvent] = []
-        for try await event in client.responsesStream(request) {
+        var events: [Event] = []
+        for try await event in node.inference.responsesStream(request) {
             events.append(event)
         }
 
@@ -31,10 +31,10 @@ final class EventStreamTests: XCTestCase {
     }
 
     func testCancelOnTermination() async throws {
-        let client = MeshClient(inviteToken: InviteToken("test-token"), ownerKeypairBytesHex: makeOwnerKeypairBytesHex())
+        let node = try makeTestNode()
         let request = ChatRequest(model: "test", messages: [])
 
-        for try await _ in client.chatStream(request) {
+        for try await _ in node.inference.chatStream(request) {
             break
         }
     }

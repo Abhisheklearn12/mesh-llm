@@ -10,4 +10,4 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 scripts/ci-sdk-fixture.sh "$1" "$2" "$3" -- \
-    cargo test -p mesh-api-ffi --test live_sdk_smoke -- --nocapture
+    cargo test -p mesh-llm-ffi --test live_sdk_smoke -- --nocapture

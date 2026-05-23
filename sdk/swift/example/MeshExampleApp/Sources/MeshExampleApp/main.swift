@@ -6,42 +6,92 @@ enum ExampleError: Error {
     case noTokenDelta
     case didNotComplete
     case chatFailed(String)
+    case servingDidNotLoad(String)
 }
 
 let args = Array(CommandLine.arguments.dropFirst())
 let inviteTokenArg = args.first { !$0.hasPrefix("--") }
-guard let token = inviteTokenArg else {
-    fputs("Usage: MeshExampleApp <invite_token>\n", stderr)
-    exit(1)
+let token = inviteTokenArg
+    ?? ProcessInfo.processInfo.environment["MESH_SDK_INVITE_TOKEN"]
+    ?? "local-mac-example"
+let localModelRef = ProcessInfo.processInfo.environment["MESH_SDK_MODEL_REF"]
+    ?? (inviteTokenArg == nil && ProcessInfo.processInfo.environment["MESH_SDK_INVITE_TOKEN"] == nil
+        ? "Qwen2.5-3B-Instruct-Q4_K_M"
+        : nil)
+let remoteModelId = ProcessInfo.processInfo.environment["MESH_SDK_MODEL_ID"]
+let cacheDir = ProcessInfo.processInfo.environment["MESH_SDK_CACHE_DIR"]
+let runtimeDir = ProcessInfo.processInfo.environment["MESH_SDK_RUNTIME_DIR"]
+let skipDownload = ProcessInfo.processInfo.environment["MESH_SDK_SKIP_DOWNLOAD"] == "1"
+let prompt = ProcessInfo.processInfo.environment["MESH_SDK_PROMPT"]
+    ?? "Say hello from this Mac in exactly seven words."
+
+if localModelRef != nil {
+    do {
+        let runtime = try NativeRuntime.prepare()
+        print("[runtime] artifact=\(runtime.artifactId) library=\(runtime.library.path)")
+    } catch {
+        FileHandle.standardError.write(Data("[error] \(error)\n".utf8))
+        exit(1)
+    }
 }
 
 // Generate an ephemeral owner keypair for the example. In a real app this
-// must be persisted across launches — see mesh-api-ffi::create_client docs.
+// must be persisted across launches.
 let ownerKeypairHex = generateOwnerKeypairHex()
-let client = MeshClient(inviteToken: InviteToken(token), ownerKeypairBytesHex: ownerKeypairHex)
 
 Task {
     do {
-        try await client.join()
+        let node = try Node(
+            inviteToken: InviteToken(token),
+            ownerKeypairBytesHex: ownerKeypairHex,
+            cacheDir: cacheDir,
+            runtimeDir: runtimeDir
+        )
+        let recommended = try await node.models.recommended()
+        let serving = try await node.serving.status()
+        print("[node] recommended_models=\(recommended.count) serving_enabled=\(serving.enabled)")
+
+        try await node.start()
         print("[connected]")
 
-        let models = try await waitForModels(client)
-        print("[models] N=\(models.count)")
-        guard !models.isEmpty else {
-            throw ExampleError.noModels
+        let selectedModel: String
+        let loadedInstanceId: String?
+        if let localModelRef {
+            if !skipDownload {
+                let downloaded = try await node.models.download(localModelRef)
+                print("[download] model_ref=\(downloaded.modelRef) files=\(downloaded.paths.count)")
+            }
+
+            let loaded = try await node.serving.load(
+                localModelRef,
+                options: LoadModelOptions(devicePolicy: .auto)
+            )
+            guard loaded.state == .ready else {
+                throw ExampleError.servingDidNotLoad(loaded.error ?? "\(loaded.state)")
+            }
+            print("[serving] model=\(loaded.modelId) instance=\(loaded.instanceId ?? "-")")
+            selectedModel = loaded.modelId
+            loadedInstanceId = loaded.instanceId
+        } else {
+            loadedInstanceId = nil
+            let models = try await waitForModels(node)
+            print("[models] N=\(models.count)")
+            guard !models.isEmpty else {
+                throw ExampleError.noModels
+            }
+            selectedModel = remoteModelId ?? models[0].id
         }
 
-        let selectedModel = ProcessInfo.processInfo.environment["MESH_SDK_MODEL_ID"] ?? models[0].id
         let request = ChatRequest(
             model: selectedModel,
-            messages: [ChatMessage(role: "user", content: "hello")]
+            messages: [ChatMessage(role: "user", content: prompt)]
         )
 
         let startTime = Date()
         var firstToken = true
         var sawToken = false
         var completed = false
-        chatLoop: for try await event in client.chatStream(request) {
+        chatLoop: for try await event in node.inference.chatStream(request) {
             switch event {
             case .tokenDelta(_, let delta):
                 if firstToken {
@@ -69,7 +119,15 @@ Task {
             throw ExampleError.didNotComplete
         }
 
-        await client.disconnect()
+        if let instanceId = loadedInstanceId {
+            try await node.serving.unloadInstance(
+                instanceId,
+                options: UnloadModelOptions(drainTimeoutMs: 1_000, force: false)
+            )
+            print("[serving] unloaded instance=\(instanceId)")
+        }
+
+        try await node.stop()
         print("[disconnect] ok")
     } catch {
         FileHandle.standardError.write(Data("[error] \(error)\n".utf8))
@@ -80,10 +138,10 @@ Task {
 
 RunLoop.main.run()
 
-func waitForModels(_ client: MeshClient) async throws -> [Model] {
+func waitForModels(_ node: Node) async throws -> [Model] {
     let deadline = Date().addingTimeInterval(30)
     while Date() < deadline {
-        let models = try await client.listModels()
+        let models = try await node.inference.listModels()
         if !models.isEmpty {
             return models
         }

@@ -69,9 +69,10 @@ jobs:
             crates/mesh-llm-types/ \
             crates/mesh-llm-plugin/ \
             crates/mesh-client/ \
-            crates/mesh-api/ \
-            crates/mesh-host-core/ \
-            crates/mesh-api-ffi/ \
+            crates/mesh-llm-api-client/ \
+            crates/mesh-llm-api-server/ \
+            crates/mesh-llm-node/ \
+            crates/mesh-llm-ffi/ \
             crates/mesh-llm-test-harness/ \
             crates/model-ref/ \
             crates/model-artifact/ \

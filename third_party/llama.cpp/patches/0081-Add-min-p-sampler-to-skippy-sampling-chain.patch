@@ -30,18 +30,18 @@ index 486e95dc..84173c02 100644
 +    float min_p;
      llama_logit_bias logit_bias[SKIPPY_MAX_LOGIT_BIAS];
  };
- 
+
 diff --git a/include/skippy/common.h b/include/skippy/common.h
 index afef2749..26e944d8 100644
 --- a/include/skippy/common.h
 +++ b/include/skippy/common.h
 @@ -26,7 +26,7 @@ extern "C" {
- 
+
  #define SKIPPY_ABI_VERSION_MAJOR 0
  #define SKIPPY_ABI_VERSION_MINOR 1
 -#define SKIPPY_ABI_VERSION_PATCH 23
 +#define SKIPPY_ABI_VERSION_PATCH 24
- 
+
  enum skippy_feature {
      SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
 diff --git a/src/skippy.cpp b/src/skippy.cpp
@@ -68,6 +68,5 @@ index f12e7d9f..f9e65718 100644
      if (sampling->temperature != 1.0f) {
          llama_sampler_chain_add(sampler, llama_sampler_init_temp(sampling->temperature));
      }
--- 
+--
 2.50.1 (Apple Git-155)
-

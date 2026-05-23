@@ -15,7 +15,15 @@ let package = Package(
             dependencies: [
                 .product(name: "MeshLLM", package: "mesh-llm"),
             ],
-            path: "Sources/MeshExampleApp"
+            path: "Sources/MeshExampleApp",
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("Metal"),
+                .linkedFramework("SystemConfiguration"),
+                .linkedLibrary("c++"),
+            ]
         ),
     ]
 )

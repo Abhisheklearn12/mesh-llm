@@ -9,7 +9,31 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-cargo build -p mesh-api-ffi
+scripts/check-sdk-contract.sh
+
+scripts/prepare-llama.sh "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
+LLAMA_STAGE_BACKEND=cpu \
+LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
+LLAMA_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
+    scripts/build-llama.sh
+
+LLAMA_STAGE_BACKEND=cpu \
+LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
+    cargo build -p mesh-llm-ffi --no-default-features --features host,embedded-runtime
+
+native_sdk_out="$REPO_ROOT/target/kotlin-native-sdk"
+LLAMA_STAGE_BACKEND=cpu \
+LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
+    scripts/package-native-sdk.sh \
+        --backend cpu \
+        --profile debug \
+        --out "$native_sdk_out"
+scripts/verify-native-sdk-package.sh "$native_sdk_out"/meshllm-native-*.tar.gz
+native_runtime_dir="$(find "$native_sdk_out" -mindepth 1 -maxdepth 1 -type d -name 'meshllm-native-*' -print -quit)"
+if [[ -z "$native_runtime_dir" ]]; then
+    echo "native SDK runtime artifact directory was not produced" >&2
+    exit 1
+fi
 
 scripts/ci-sdk-fixture.sh "$1" "$2" "$3" -- \
     bash -lc '
@@ -22,13 +46,7 @@ scripts/ci-sdk-fixture.sh "$1" "$2" "$3" -- \
             export ORG_GRADLE_JAVA_HOME="${ORG_GRADLE_JAVA_HOME:-$JAVA_HOME}"
             export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.java.installations.auto-detect=false -Dorg.gradle.java.installations.paths=$ORG_GRADLE_JAVA_HOME"
         fi
-        if [ -f '"$REPO_ROOT"'/target/debug/libmesh_ffi.dylib ] && [ ! -e '"$REPO_ROOT"'/target/debug/libuniffi_mesh_ffi.dylib ]; then
-            ln -sf libmesh_ffi.dylib '"$REPO_ROOT"'/target/debug/libuniffi_mesh_ffi.dylib
-        fi
-        if [ -f '"$REPO_ROOT"'/target/debug/libmesh_ffi.so ] && [ ! -e '"$REPO_ROOT"'/target/debug/libuniffi_mesh_ffi.so ]; then
-            ln -sf libmesh_ffi.so '"$REPO_ROOT"'/target/debug/libuniffi_mesh_ffi.so
-        fi
-        export JAVA_TOOL_OPTIONS="-Djna.library.path='"$REPO_ROOT"'/target/debug"
+        export MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR='"$native_runtime_dir"'
         cd '"$REPO_ROOT"'/sdk/kotlin/example/example-jvm
         ./gradlew --no-daemon run --args="$MESH_SDK_INVITE_TOKEN"
     '

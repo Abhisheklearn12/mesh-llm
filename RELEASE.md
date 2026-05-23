@@ -76,6 +76,19 @@ chain to crates.io in dependency order:
 scripts/publish-crates.sh --dry-run
 ```
 
+The chain currently publishes:
+
+1. `model-ref`
+2. `mesh-llm-identity`
+3. `mesh-llm-protocol`
+4. `mesh-llm-routing`
+5. `mesh-llm-types`
+6. `model-artifact`
+7. `model-hf`
+8. `mesh-llm-client`
+9. `mesh-llm-node`
+10. `mesh-llm-api-server`
+
 Run the dry-run before cutting a GA tag after changing SDK crate manifests or
 workspace-internal SDK dependencies. On the first release that introduces a
 new internal SDK crate, the dry-run validates packages whose registry

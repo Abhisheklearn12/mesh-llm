@@ -8,10 +8,9 @@ let ffiXCFrameworkRelativePath = "\(swiftSDKRelativePath)/Generated/MeshLLMFFI.x
 let ffiXCFrameworkPath = "\(repoRoot)/\(ffiXCFrameworkRelativePath)"
 let remoteFFIXCFrameworkURL = "https://github.com/Mesh-LLM/mesh-llm/releases/download/__MESH_SWIFT_RELEASE_TAG__/MeshLLMFFI.xcframework.zip"
 let remoteFFIXCFrameworkChecksum = "__MESH_SWIFT_RELEASE_CHECKSUM__"
-let forceStubFFI = ProcessInfo.processInfo.environment["MESH_SWIFT_FORCE_STUB"] == "1"
 let hasLocalFFIXCFramework = FileManager.default.fileExists(atPath: ffiXCFrameworkPath)
-let hasRemoteFFIXCFramework = !forceStubFFI
-    && !remoteFFIXCFrameworkURL.contains("__MESH_SWIFT_RELEASE_TAG__")
+let hasRemoteFFIXCFramework =
+    !remoteFFIXCFrameworkURL.contains("__MESH_SWIFT_RELEASE_TAG__")
     && !remoteFFIXCFrameworkChecksum.contains("__MESH_SWIFT_RELEASE_CHECKSUM__")
 
 var meshLLMDependencies: [Target.Dependency] = []
@@ -57,7 +56,14 @@ let package = Package(
             path: "sdk/swift/Sources/MeshLLM",
             exclude: hasFFIBinaryTarget ? [] : ["Generated"],
             linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("AppKit", .when(platforms: [.macOS])),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("Foundation"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
                 .linkedFramework("SystemConfiguration"),
+                .linkedLibrary("c++"),
             ]
         ),
         .testTarget(

@@ -3,12 +3,12 @@
 # Required for Android 15+ and Google Play (mandatory from August 2025).
 #
 # Usage:
-#   ./verify-alignment.sh [path/to/libmesh_ffi.so]
+#   ./verify-alignment.sh [path/to/libmeshllm_ffi.so]
 #
 # Defaults to arm64-v8a if no path is given.
 set -euo pipefail
 
-SO_PATH="${1:-sdk/kotlin/src/main/jniLibs/arm64-v8a/libmesh_ffi.so}"
+SO_PATH="${1:-sdk/kotlin/src/main/jniLibs/arm64-v8a/libmeshllm_ffi.so}"
 
 if [ ! -f "$SO_PATH" ]; then
     echo "ERROR: .so not found at: $SO_PATH"

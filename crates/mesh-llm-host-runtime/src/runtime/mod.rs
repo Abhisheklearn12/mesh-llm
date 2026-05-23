@@ -49,6 +49,7 @@ use crate::plugin;
 use crate::system::{autoupdate, backend, benchmark, hardware};
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 use skippy_protocol::FlashAttentionType;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -6247,6 +6248,8 @@ async fn run_auto_load_runtime_model(
     );
     ctx.runtime_survey_models
         .insert(instance_id.clone(), survey_loaded_model);
+    let loaded_backend = handle.backend.clone();
+    let loaded_context_length = handle.context_length;
     ctx.runtime_models.insert(
         instance_id.clone(),
         RuntimeModelHandleEntry {
@@ -6256,21 +6259,32 @@ async fn run_auto_load_runtime_model(
         },
     );
     Ok(api::RuntimeLoadResponse {
+        model_ref: requested_model,
         model: loaded_name,
         instance_id,
+        backend: Some(loaded_backend),
+        context_length: Some(loaded_context_length),
     })
 }
 
 async fn run_auto_unload_runtime_model(
     ctx: &mut RunAutoRuntimeLoopContext<'_>,
-    target: String,
+    target: UnloadTarget,
+    options: UnloadOptions,
 ) -> Result<api::RuntimeUnloadResponse> {
     let unload = resolve_runtime_unload_target(
-        &target,
+        target.as_runtime_target(),
         runtime_unload_candidates(ctx.runtime_models, ctx.managed_models),
     )?;
+    let drain_delay = if options.force {
+        Duration::ZERO
+    } else {
+        options.drain_timeout
+    };
     match unload.owner {
-        RuntimeUnloadOwner::Runtime => run_auto_unload_runtime_entry(ctx, unload).await,
+        RuntimeUnloadOwner::Runtime => {
+            run_auto_unload_runtime_entry(ctx, unload, drain_delay).await
+        }
         RuntimeUnloadOwner::Managed => {
             let Some(controller) = ctx.managed_models.remove(&unload.instance_id) else {
                 anyhow::bail!(
@@ -6280,7 +6294,7 @@ async fn run_auto_unload_runtime_model(
             };
             let model = controller.model_name.clone();
             let _ = controller.stop_tx.send(true);
-            let _ = controller.task.await;
+            await_managed_model_stop(controller.task, drain_delay, options.force, &model).await;
             if !runtime_registry_has_model(ctx.runtime_instance_registry, &model).await {
                 publish_runtime_llama_unavailable(
                     ctx.runtime_data_producer,
@@ -6302,7 +6316,36 @@ async fn run_auto_unload_runtime_model(
             Ok(api::RuntimeUnloadResponse {
                 model,
                 instance_id: unload.instance_id,
+                unloaded: true,
             })
+        }
+    }
+}
+
+async fn await_managed_model_stop(
+    mut task: tokio::task::JoinHandle<()>,
+    drain_timeout: Duration,
+    force: bool,
+    model: &str,
+) {
+    if force {
+        task.abort();
+        let _ = task.await;
+        return;
+    }
+
+    match tokio::time::timeout(drain_timeout, &mut task).await {
+        Ok(join_result) => {
+            let _ = join_result;
+        }
+        Err(_) => {
+            tracing::warn!(
+                model,
+                drain_timeout_ms = drain_timeout.as_millis(),
+                "managed model task did not stop within unload drain timeout; aborting"
+            );
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -6310,6 +6353,7 @@ async fn run_auto_unload_runtime_model(
 async fn run_auto_unload_runtime_entry(
     ctx: &mut RunAutoRuntimeLoopContext<'_>,
     unload: RuntimeUnloadCandidate,
+    drain_delay: Duration,
 ) -> Result<api::RuntimeUnloadResponse> {
     let Some(entry) = ctx.runtime_models.remove(&unload.instance_id) else {
         anyhow::bail!(
@@ -6360,7 +6404,9 @@ async fn run_auto_unload_runtime_entry(
         ))
         .await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if !drain_delay.is_zero() {
+        tokio::time::sleep(drain_delay).await;
+    }
     remove_dashboard_context_usage(ctx.dashboard_context_usage, &model, &handle).await;
     handle.shutdown().await;
     drop(capacity_reservation);
@@ -6375,6 +6421,7 @@ async fn run_auto_unload_runtime_entry(
     Ok(api::RuntimeUnloadResponse {
         model,
         instance_id: unload.instance_id,
+        unloaded: true,
     })
 }
 
@@ -6450,8 +6497,12 @@ async fn run_auto_handle_control_request(
             let _ = resp.send(result);
             false
         }
-        api::RuntimeControlRequest::Unload { target, resp } => {
-            let result = run_auto_unload_runtime_model(ctx, target).await;
+        api::RuntimeControlRequest::Unload {
+            target,
+            options,
+            resp,
+        } => {
+            let result = run_auto_unload_runtime_model(ctx, target, options).await;
             let _ = resp.send(result);
             false
         }

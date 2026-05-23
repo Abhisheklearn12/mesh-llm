@@ -1,0 +1,31 @@
+{
+  "name": "@meshllm/sdk",
+  "version": "0.66.0",
+  "description": "Node.js SDK for MeshLLM client and local serving applications",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native-runtime.js",
+    "native/",
+    "README.md"
+  ],
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "license": "MIT OR Apache-2.0"
+}

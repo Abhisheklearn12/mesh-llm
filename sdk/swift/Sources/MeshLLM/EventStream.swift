@@ -1,11 +1,21 @@
 import Foundation
 
-public extension MeshClient {
-    func chatStream(_ request: ChatRequest) -> AsyncThrowingStream<MeshEvent, Error> {
+public extension Node.Inference {
+    func chatStream(_ request: ChatRequest) -> AsyncThrowingStream<Event, Error> {
         chat(request)
     }
 
-    func responsesStream(_ request: ResponsesRequest) -> AsyncThrowingStream<MeshEvent, Error> {
+    func responsesStream(_ request: ResponsesRequest) -> AsyncThrowingStream<Event, Error> {
+        responses(request)
+    }
+}
+
+public extension Client.Inference {
+    func chatStream(_ request: ChatRequest) -> AsyncThrowingStream<Event, Error> {
+        chat(request)
+    }
+
+    func responsesStream(_ request: ResponsesRequest) -> AsyncThrowingStream<Event, Error> {
         responses(request)
     }
 }
@@ -14,14 +24,14 @@ public extension MeshClient {
 import MeshLLMFFI
 
 public final class EventStreamBridge: EventListener, @unchecked Sendable {
-    private let continuation: AsyncThrowingStream<MeshEvent, Error>.Continuation
+    private let continuation: AsyncThrowingStream<Event, Error>.Continuation
     private let onCancel: @Sendable (String) -> Void
     private let stateLock = NSLock()
     private var requestId: String?
     private var finished = false
 
     public init(
-        continuation: AsyncThrowingStream<MeshEvent, Error>.Continuation,
+        continuation: AsyncThrowingStream<Event, Error>.Continuation,
         onCancel: @escaping @Sendable (String) -> Void
     ) {
         self.continuation = continuation
@@ -41,8 +51,8 @@ public final class EventStreamBridge: EventListener, @unchecked Sendable {
         stateLock.unlock()
     }
 
-    public func onEvent(event: EventDto) {
-        let mapped = MeshClient.mapEvent(event)
+    public func onEvent(event: ClientEvent) {
+        let mapped = Node.mapEvent(event)
         switch mapped {
         case .completed, .failed, .disconnected:
             finish(with: mapped)
@@ -54,7 +64,6 @@ public final class EventStreamBridge: EventListener, @unchecked Sendable {
                 return
             }
             continuation.yield(mapped)
-            break
         }
     }
 
@@ -92,7 +101,7 @@ public final class EventStreamBridge: EventListener, @unchecked Sendable {
         onCancel(requestId)
     }
 
-    private func finish(with event: MeshEvent) {
+    private func finish(with event: Event) {
         stateLock.lock()
         guard !finished else {
             stateLock.unlock()
@@ -104,64 +113,6 @@ public final class EventStreamBridge: EventListener, @unchecked Sendable {
 
         continuation.yield(event)
         continuation.finish()
-    }
-}
-#else
-public final class EventStreamBridge: @unchecked Sendable {
-    private let continuation: AsyncThrowingStream<MeshEvent, Error>.Continuation
-    private let requestId: RequestId
-    private weak var client: MeshClient?
-    private let stateLock = NSLock()
-    private var finished = false
-
-    public init(
-        continuation: AsyncThrowingStream<MeshEvent, Error>.Continuation,
-        requestId: RequestId,
-        client: MeshClient
-    ) {
-        self.continuation = continuation
-        self.requestId = requestId
-        self.client = client
-
-        continuation.onTermination = { [weak self] _ in
-            guard let self else { return }
-            self.client?.cancel(self.requestId)
-        }
-    }
-
-    public func emit(_ event: MeshEvent) {
-        stateLock.lock()
-        guard !finished else {
-            stateLock.unlock()
-            return
-        }
-
-        switch event {
-        case .completed, .failed, .disconnected:
-            finished = true
-            stateLock.unlock()
-            continuation.yield(event)
-            continuation.finish()
-        default:
-            stateLock.unlock()
-            continuation.yield(event)
-        }
-    }
-
-    public func finish(throwing error: Error? = nil) {
-        stateLock.lock()
-        guard !finished else {
-            stateLock.unlock()
-            return
-        }
-        finished = true
-        stateLock.unlock()
-
-        if let error {
-            continuation.finish(throwing: error)
-        } else {
-            continuation.finish()
-        }
     }
 }
 #endif

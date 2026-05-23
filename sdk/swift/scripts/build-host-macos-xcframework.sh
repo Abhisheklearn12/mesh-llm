@@ -12,8 +12,8 @@ GENERATED_SWIFT="$SWIFT_DIR/Sources/MeshLLM/Generated/mesh_ffi.swift"
 echo "Building host macOS $FRAMEWORK_NAME XCFramework..."
 echo "Repo root: $REPO_ROOT"
 
-if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-api-ffi"'; then
-  echo "ERROR: mesh-api-ffi crate not found. Ensure the workspace is configured."
+if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-llm-ffi"'; then
+  echo "ERROR: mesh-llm-ffi crate not found. Ensure the workspace is configured."
   exit 1
 fi
 
@@ -39,13 +39,24 @@ rustup target add "$RUST_TARGET" 2>/dev/null || true
 
 "$SWIFT_DIR/scripts/generate-swift-bindings.sh"
 
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+export LLAMA_STAGE_BACKEND="${LLAMA_STAGE_BACKEND:-metal}"
+export LLAMA_STAGE_BUILD_DIR="${LLAMA_STAGE_BUILD_DIR:-$REPO_ROOT/.deps/llama.cpp/build-stage-abi-metal}"
+
+echo "Preparing embedded llama.cpp ABI libraries..."
+"$REPO_ROOT/scripts/prepare-llama.sh" "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
+LLAMA_BUILD_DIR="$LLAMA_STAGE_BUILD_DIR" "$REPO_ROOT/scripts/build-llama.sh"
+
 RUSTUP_RUSTC="$(rustup run stable which rustc)"
 echo "Using rustc: $RUSTUP_RUSTC"
 echo "Building for $RUST_TARGET..."
+echo "macOS deployment target: $MACOSX_DEPLOYMENT_TARGET"
+echo "llama.cpp backend: $LLAMA_STAGE_BACKEND"
+echo "llama.cpp build dir: $LLAMA_STAGE_BUILD_DIR"
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target "$RUST_TARGET" --no-default-features
+  cargo build --release -p mesh-llm-ffi --target "$RUST_TARGET" --no-default-features --features host,embedded-runtime
 
-LIB_PATH="$TARGET_DIR/$RUST_TARGET/release/libmesh_ffi.a"
+LIB_PATH="$TARGET_DIR/$RUST_TARGET/release/libmeshllm_ffi.a"
 
 echo "Syncing UniFFI API checksums into generated Swift bindings..."
 python3 - "$LIB_PATH" "$GENERATED_SWIFT" <<'PY'
@@ -65,7 +76,7 @@ disassembly = subprocess.run(
 ).stdout
 
 pattern = re.compile(
-    r"_uniffi_mesh_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
+    r"_uniffi_meshllm_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
     re.MULTILINE,
 )
 checksums = {name: int(value, 16) for name, value in pattern.findall(disassembly)}

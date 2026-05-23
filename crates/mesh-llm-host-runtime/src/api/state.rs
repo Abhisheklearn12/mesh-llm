@@ -3,6 +3,7 @@ use crate::network::affinity;
 use crate::network::discovery::MeshDiscoveryMode;
 use crate::plugin;
 use crate::runtime_data;
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 use serde::{Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,7 +46,8 @@ pub enum RuntimeControlRequest {
         resp: tokio::sync::oneshot::Sender<anyhow::Result<RuntimeLoadResponse>>,
     },
     Unload {
-        target: String,
+        target: UnloadTarget,
+        options: UnloadOptions,
         resp: tokio::sync::oneshot::Sender<anyhow::Result<RuntimeUnloadResponse>>,
     },
     Shutdown,
@@ -53,14 +55,20 @@ pub enum RuntimeControlRequest {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeLoadResponse {
+    pub model_ref: String,
     pub model: String,
     pub instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeUnloadResponse {
     pub model: String,
     pub instance_id: String,
+    pub unloaded: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -71,6 +79,8 @@ pub struct RuntimeModelPayload {
     pub backend: String,
     pub status: String,
     pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

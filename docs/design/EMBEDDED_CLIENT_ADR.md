@@ -1,172 +1,474 @@
-# ADR: Native Embedded SDK for mesh-llm
+# ADR: Native Mesh Node SDK for mesh-llm
 
 ## Status
 
-Accepted — supersedes any informal discussion in issue #188
+Accepted direction, superseding the previous client-only SDK contract.
+
+The earlier SDK work treated `MeshClient` as the primary product surface and
+left host/server APIs, local model management, and model downloading out of
+scope. That shape was useful for extraction, but it is not the right long-term
+SDK contract. The SDK should embed a mesh node into an application. That node
+may consume inference from the mesh, manage local model artifacts, serve local
+models into the mesh, or combine those roles.
 
 ---
 
 ## Context
 
-Native iOS, macOS, and Android apps need to join mesh-llm meshes without running a localhost HTTP server, spawning a sidecar process, or invoking the CLI. The existing mesh-llm binary is a desktop-first process that binds ports, spawns child processes, and reads credentials from the filesystem. None of that is acceptable inside a sandboxed mobile app.
+Applications embedding mesh-llm need more than an OpenAI-compatible client. A
+useful SDK must let the embedding application participate in the mesh as a
+first-class node:
 
-Issue #188 identified the core need: extract the passive Rust client from mesh-llm, expose it via uniffi-rs, and ship Swift and Kotlin bindings that app developers can drop into their projects. The result must be App Store-safe: no subprocess spawning, no ambient port binding, no filesystem credential loading.
+- discover and call models already available in the mesh
+- download, inspect, install, delete, and clean up local model artifacts
+- load and unload local models for serving
+- advertise serving capacity and model capabilities to peers
+- observe model, serving, request, and connection lifecycle events
 
-The passive client role already exists in the mesh-llm codebase as `NodeRole::Client`. It joins a mesh via an invite token, discovers available models, routes inference requests through QUIC tunnels, and receives streamed responses. It does not run llama-server, rpc-server, or any inference process. Extracting that role into a standalone crate is the foundation of this work.
+The current tree already has pieces of this split across the CLI, host runtime,
+client SDK crates, and management API:
+
+- `mesh-client` contains low-level client transport and routing behavior
+- `mesh-llm-api-server` exposes a client-oriented Rust SDK
+- `mesh-llm-ffi` wraps the SDK for Swift and Kotlin
+- `mesh-llm-node` exists as the intended embeddable node boundary
+- `mesh-llm-host-runtime` owns CLI, management API, model acquisition, model
+  cache inspection, local runtime control, and serving orchestration
+
+Because the existing client SDK has no known external consumers, preserving the
+`MeshClient`-first surface is not a compatibility requirement. We should
+replace it with the node-oriented SDK now, before language bindings and app
+integrations depend on the narrower shape.
 
 ---
 
 ## Decision
 
-### FFI Toolchain
+The public SDK concept is `MeshNode`.
 
-**uniffi-rs v0.31+** is the chosen FFI layer. It generates Swift and Kotlin bindings from a single Rust interface definition, supports async functions natively, and has an active maintenance track. The alternatives were evaluated and rejected:
+`MeshNode` is the object an application embeds. It owns node identity,
+connection lifecycle, model cache configuration, local runtime configuration,
+event emission, and role configuration. Client-only operation is just a node
+with serving disabled. Serving operation is the same node with local model
+serving enabled through an in-process serving controller. SDK serving APIs must
+not use the local REST management API as their primary implementation; REST is
+only an adapter for controlling an external daemon.
 
-- **swift-bridge**: Rust-only. No Kotlin support. Rejected.
-- **diplomat**: Less mature ecosystem, smaller community, fewer production deployments. Rejected.
-- **cbindgen**: C ABI only. No async support. Rejected.
+The reference in-process serving controller is the host runtime management
+state, `mesh-llm-host-runtime::api::MeshApi`. Host runtime construction wires
+that controller into `MeshNodeBuilder` with
+`MeshApi::configure_sdk_node_builder(...)`, so `MeshNode::serving().load()` and
+`MeshNode::serving().unload()` enter the existing runtime-control loop directly.
 
-### Crate Structure
-
-Wave 1 splits the workspace into four new crates immediately:
-
-- `mesh-client` — pure Rust client logic, no FFI, no host code
-- `mesh-host-core` — host-side orchestration, macOS-only, behind a feature flag
-- `mesh-api-ffi` — uniffi-rs bridge, depends on `mesh-client` and optionally `mesh-host-core`
-- `mesh-llm-test-harness` — shared test infrastructure, `FixtureMesh` lives here
-
-### Phases
-
-The work is organized into seven phases:
-
-- **Phase 1**: Workspace skeleton, ADR, and toolchain POC
-- **Phase 2**: Extract protocol types and wire format from `mesh-llm`
-- **Phase 3**: Extract client networking (QUIC, gossip, routing) into `mesh-client`
-- **Phase 4**: Implement `MeshClient` and `MeshHost` against the extracted core
-- **Phase 5**: uniffi-rs bindings, Swift package, Kotlin artifact
-- **Phase 6**: Integration tests, platform CI, and wave-end gates
-- **Phase 7**: Document existing `mesh-llm/0` and `mesh-llm/1` dual-support as a compatibility guarantee for embedded clients. This phase records the existing behavior; it does not design a new protocol.
-
-### Development Discipline
-
-TDD across all surfaces. Every extraction follows the recipe: write a failing test in the destination crate, copy the implementation byte-for-byte, add a transitional re-export shim in the source crate, verify `just build && cargo test --workspace` passes, then commit atomically.
-
----
-
-## Cargo Feature Topology
-
-`mesh-api-ffi` has a `host` feature that is **off by default**.
-
-| Build target | Cargo flags |
-|---|---|
-| iOS / Android | `--no-default-features` |
-| macOS host | `--features host` |
-
-`mesh-client` has a strict dependency policy. Its dependency tree is allowed to include the transport, protocol, crypto, parsing, and async crates needed for an embedded QUIC client, including the current set used in this PR such as `iroh`, `tokio`, `prost`, `bytes`, `rustls`, `quinn`, `serde`, `serde_json`, `thiserror`, `anyhow`, `tracing`, `sha2`, `ed25519-dalek`, `hex`, `uuid`, `url`, `http`, `base64`, `nostr-sdk`, `crypto_box`, `rand`, `async-trait`, and `httparse`.
-
-The actual CI-enforced constraint is that `mesh-client` must not pull in desktop/host-oriented crates such as credential stores, CLI frameworks, or plugin/runtime host dependencies. This keeps the mobile binary size predictable and prevents accidental inclusion of desktop-only code.
-
-`mesh-api-ffi` must not directly depend on `iroh`, `tokio`, or `prost`. It reaches those through `mesh-client` only.
-
----
-
-## MVP API (Closed List — Authoritative)
-
-This is the complete, closed API surface for the embedded SDK. No methods may be added without a new ADR revision.
-
-### MeshClient
-
-`MeshClient` is the primary type for mobile and embedded use. It is available on all platforms.
+The public API is organized into namespaces rather than a large flat method
+list:
 
 ```rust
-impl MeshClient {
-    pub fn new(keypair: OwnerKeypair, token: InviteToken) -> Result<Self, MeshError>;
-    pub async fn join(&mut self) -> Result<(), MeshError>;
+node.inference()
+node.models()
+node.serving()
+node.status()
+node.events()
+```
+
+Public SDK names should use Mesh/product language. The current internal serving
+runtime name is not part of the public SDK contract. APIs should say
+`ModelRuntime`, `ServingConfig`, `StageTopology`, `DevicePolicy`, and
+`ModelConfig`, not implementation-specific runtime names.
+
+### Example
+
+```rust
+let node = MeshNode::builder()
+    .identity(identity)
+    .join(invite_token)
+    .cache_dir(cache_dir)
+    .runtime_dir(runtime_dir)
+    .serving_enabled(true)
+    .build()?;
+
+node.start().await?;
+
+let model = node
+    .models()
+    .download("Qwen3-0.6B-Q4_K_M", DownloadOptions::default())
+    .await?;
+
+node.serving()
+    .load(model.model_ref, LoadModelOptions::default())
+    .await?;
+
+let request_id = node.inference().chat(request, listener).await?;
+```
+
+---
+
+## Public API Shape
+
+This is the target SDK shape. Exact type names may change during
+implementation, but the ownership boundaries should not.
+
+### MeshNode
+
+```rust
+impl MeshNode {
+    pub fn builder() -> MeshNodeBuilder;
+
+    pub async fn start(&self) -> Result<(), MeshError>;
+    pub async fn stop(&self) -> Result<(), MeshError>;
+    pub async fn reconnect(&self) -> Result<(), MeshError>;
+
+    pub fn inference(&self) -> MeshInference;
+    pub fn models(&self) -> MeshModels;
+    pub fn serving(&self) -> MeshServing;
+    pub fn status(&self) -> MeshStatusApi;
+    pub fn events(&self) -> MeshEvents;
+}
+```
+
+`MeshNode` replaces `MeshClient` as the primary SDK type. A transitional
+`MeshClient` alias or wrapper may exist only while internal call sites and
+generated bindings are moved.
+
+### Builder
+
+```rust
+impl MeshNodeBuilder {
+    pub fn identity(self, identity: OwnerKeypair) -> Self;
+    pub fn join(self, token: InviteToken) -> Self;
+    pub fn user_agent(self, user_agent: impl Into<String>) -> Self;
+    pub fn connect_timeout(self, timeout: Duration) -> Self;
+    pub fn cache_dir(self, path: impl Into<PathBuf>) -> Self;
+    pub fn runtime_dir(self, path: impl Into<PathBuf>) -> Self;
+    pub fn serving_enabled(self, enabled: bool) -> Self;
+    pub fn device_policy(self, policy: DevicePolicy) -> Self;
+    pub fn serving_controller(self, controller: Arc<dyn ServingController>) -> Self;
+    pub fn build(self) -> Result<MeshNode, MeshError>;
+}
+```
+
+The SDK does not read identity or credentials from ambient filesystem locations.
+The embedding application passes identity and storage policy explicitly.
+When the SDK is embedded in the host runtime, host startup must attach the live
+`MeshApi` controller to the builder before `build()`. Setting
+`serving_enabled(true)` without a controller only records desired configuration;
+it does not provide load/unload capability.
+
+### Inference API
+
+```rust
+impl MeshInference {
     pub async fn list_models(&self) -> Result<Vec<Model>, MeshError>;
-    pub async fn chat(&self, request: ChatRequest, listener: Box<dyn EventListener>) -> Result<RequestId, MeshError>;
-    pub async fn responses(&self, request: ResponsesRequest, listener: Box<dyn EventListener>) -> Result<RequestId, MeshError>;
+    pub async fn chat(
+        &self,
+        request: ChatRequest,
+        listener: Arc<dyn EventListener>,
+    ) -> Result<RequestId, MeshError>;
+    pub async fn responses(
+        &self,
+        request: ResponsesRequest,
+        listener: Arc<dyn EventListener>,
+    ) -> Result<RequestId, MeshError>;
     pub async fn cancel(&self, request_id: RequestId) -> Result<(), MeshError>;
-    pub async fn status(&self) -> Result<MeshStatus, MeshError>;
-    pub async fn disconnect(&mut self) -> Result<(), MeshError>;
-    pub async fn reconnect(&mut self) -> Result<(), MeshError>;
 }
 ```
 
-Nine methods. No more, no fewer.
+`chat` maps to `/v1/chat/completions`. `responses` maps to `/v1/responses`.
+Both deliver incremental output through the node event model.
 
-`chat` maps to the `/v1/chat/completions` endpoint. `responses` maps to `/v1/responses`. Both deliver tokens incrementally via `EventListener`. `cancel` terminates an in-flight request by `RequestId`. `reconnect` is async and is intended to be awaited from foreground-resume handling after the app returns from background.
+### Model Management API
 
-### MeshHost
-
-`MeshHost` is macOS-only and lives behind `#[cfg(feature = "host")]`. It is not available on iOS or Android.
+Model management is part of the node SDK because serving depends on local model
+state and because the embedding application owns cache policy.
 
 ```rust
-impl MeshHost {
-    pub fn new(keypair: OwnerKeypair, config: HostConfig) -> Result<Self, MeshError>;
-    pub async fn start(&mut self) -> Result<InviteToken, MeshError>;
-    pub async fn stop(&mut self) -> Result<(), MeshError>;
-    pub async fn load_model(&mut self, model: &str) -> Result<(), MeshError>;
-    pub async fn unload_model(&mut self, model: &str) -> Result<(), MeshError>;
-    pub async fn host_status(&self) -> Result<HostStatus, MeshError>;
+impl MeshModels {
+    pub async fn recommended(&self) -> Result<Vec<ModelSummary>, MeshError>;
+    pub async fn search(&self, query: ModelSearchQuery) -> Result<Vec<ModelSummary>, MeshError>;
+    pub async fn show(&self, model_ref: impl AsRef<str>) -> Result<ModelDetails, MeshError>;
+
+    pub async fn installed(&self) -> Result<Vec<InstalledModel>, MeshError>;
+    pub async fn cache_status(&self) -> Result<ModelCacheStatus, MeshError>;
+
+    pub async fn download(
+        &self,
+        model_ref: impl AsRef<str>,
+        options: DownloadOptions,
+    ) -> Result<DownloadedModel, MeshError>;
+    pub async fn cancel_download(&self, download_id: DownloadId) -> Result<(), MeshError>;
+
+    pub async fn delete(
+        &self,
+        model_ref: impl AsRef<str>,
+        options: DeleteModelOptions,
+    ) -> Result<DeleteModelResult, MeshError>;
+    pub async fn cleanup(&self, policy: CleanupPolicy) -> Result<CleanupResult, MeshError>;
+    pub async fn prune_derived_cache(
+        &self,
+        policy: PrunePolicy,
+    ) -> Result<PruneResult, MeshError>;
 }
 ```
 
-Six methods. `start` returns an `InviteToken` that the host app can share with clients. `load_model` and `unload_model` manage the active model set at runtime.
+Definitions:
+
+- `download` puts source model artifacts on disk.
+- `delete` removes source model artifacts and must refuse loaded models unless
+  the caller explicitly forces the operation.
+- `cleanup` removes managed source artifacts according to an unused/stale
+  policy.
+- `prune_derived_cache` removes derived runtime artifacts while preserving source
+  model artifacts.
+
+The SDK should accept the same model reference forms as the CLI:
+
+- catalog ids such as `Qwen3-0.6B-Q4_K_M`
+- Hugging Face refs such as `unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL`
+- immutable `hf://namespace/repo@revision` refs
+- local model paths where supported by the serving runtime
+
+### Serving API
+
+Serving lifecycle is separate from model management. Downloading a model does
+not make it active. Loading a model makes it served by this running node.
+
+```rust
+impl MeshServing {
+    pub async fn load(
+        &self,
+        model_ref: impl AsRef<str>,
+        options: LoadModelOptions,
+    ) -> Result<ServedModel, MeshError>;
+    pub async fn unload(
+        &self,
+        target: UnloadTarget,
+        options: UnloadModelOptions,
+    ) -> Result<(), MeshError>;
+    pub async fn unload_model(
+        &self,
+        model_id: impl AsRef<str>,
+        options: UnloadModelOptions,
+    ) -> Result<(), MeshError>;
+    pub async fn unload_instance(
+        &self,
+        instance_id: impl AsRef<str>,
+        options: UnloadModelOptions,
+    ) -> Result<(), MeshError>;
+    pub async fn served_models(&self) -> Result<Vec<ServedModel>, MeshError>;
+    pub async fn status(&self) -> Result<ServingStatus, MeshError>;
+    pub async fn set_device_policy(&self, policy: DevicePolicy) -> Result<(), MeshError>;
+}
+
+pub enum UnloadTarget {
+    Model(String),
+    Instance(String),
+}
+
+pub struct UnloadModelOptions {
+    pub drain_timeout: Duration,
+    pub force: bool,
+}
+
+pub struct ServedModel {
+    pub model_ref: String,
+    pub model_id: String,
+    pub instance_id: Option<String>,
+    pub state: ServingModelState,
+    pub backend: Option<String>,
+    pub capabilities: ModelCapabilities,
+    pub context_length: Option<u32>,
+    pub error: Option<String>,
+}
+
+pub enum ServingModelState {
+    Loading,
+    Ready,
+    Failed,
+    Unloading,
+    Stopped,
+    Unknown(String),
+}
+
+pub enum DevicePolicy {
+    Auto,
+    Cpu,
+    Gpu { device_ids: Vec<String> },
+}
+```
+
+The serving API advertises normal mesh model descriptors and capabilities. It
+must preserve mixed-version mesh compatibility. Any serving SDK node is a real
+mesh participant, not a side-channel runtime.
+
+Load accepts model references only. It never accepts runtime instance ids.
+Loading an already-loading or already-ready model should return the existing
+`ServedModel`. Unload targets are explicit: callers unload either a model or a
+specific runtime instance. Unloading a missing target succeeds by default so app
+lifecycle cleanup can be idempotent. Default unload behavior drains active
+requests before unloading; `force` bypasses that drain where the runtime
+supports it.
+
+Serving errors should be typed at the SDK boundary:
+
+```rust
+pub enum ServingError {
+    ModelNotFound { model_ref: String },
+    DownloadRequired { model_ref: String },
+    LoadFailed { model_ref: String, message: String },
+    UnloadFailed { target: UnloadTarget, message: String },
+    UnsupportedDevicePolicy { policy: DevicePolicy },
+    RuntimeUnavailable { message: String },
+}
+```
+
+### Status API
+
+```rust
+impl MeshStatusApi {
+    pub async fn node(&self) -> Result<NodeStatus, MeshError>;
+    pub async fn peers(&self) -> Result<Vec<PeerStatus>, MeshError>;
+    pub async fn models(&self) -> Result<Vec<Model>, MeshError>;
+    pub async fn runtime(&self) -> Result<RuntimeStatus, MeshError>;
+}
+```
+
+### Events
+
+The SDK exposes one node event stream. Language-specific bindings may adapt that
+stream to callbacks, async sequences, flows, or host framework events.
+
+```rust
+pub enum MeshEvent {
+    Starting,
+    Joined { node_id: String },
+    PeerDiscovered { node_id: String },
+    ModelsUpdated { models: Vec<Model> },
+    Disconnected { reason: String },
+
+    ModelDownloadStarted { download_id: DownloadId, model_ref: String },
+    ModelDownloadProgress { download_id: DownloadId, received_bytes: u64, total_bytes: Option<u64> },
+    ModelDownloadCompleted { download_id: DownloadId, model: DownloadedModel },
+    ModelDownloadFailed { download_id: DownloadId, error: String },
+
+    ModelInstalled { model: InstalledModel },
+    ModelDeleted { model_ref: String },
+
+    ModelLoading { model_ref: String },
+    ModelReady { model: ServedModel },
+    ModelUnloading { model_id: String },
+    ModelUnloaded { model_id: String },
+    ModelFailed { model_ref: String, error: String },
+
+    RequestStarted { request_id: RequestId, model: String },
+    TokenDelta { request_id: RequestId, delta: String },
+    RequestCompleted { request_id: RequestId },
+    RequestFailed { request_id: RequestId, error: String },
+}
+```
+
+---
+
+## Crate Structure
+
+Target ownership:
+
+- `mesh-sdk` or the reworked `mesh-llm-api-server`
+  - public Rust SDK: `MeshNode`, namespaced APIs, public SDK types
+- `mesh-client`
+  - low-level client transport, routing, request forwarding, protocol handling
+- `mesh-llm-node`
+  - embeddable node model management and serving control behind SDK-safe APIs
+- `mesh-llm-ffi`
+  - UniFFI wrapper over the node SDK for Swift, Kotlin, and future native
+    bindings
+- `sdk/swift`
+  - thin generated Swift package and platform-specific wrapper ergonomics
+- `sdk/kotlin`
+  - thin generated Kotlin/JVM/Android package and wrapper ergonomics
+
+The existing `mesh-llm-api-server` crate may be renamed to `mesh-sdk` or reworked in place.
+Because there are no known external users, keeping the old `MeshClient` naming
+is not required.
+
+CLI commands should become thin wrappers over library APIs where practical. The
+CLI should not remain the owner of model search, show, download, installed,
+delete, cleanup, prune, or local load/unload behavior.
 
 ---
 
 ## Extraction Map
 
-Code from `crates/mesh-llm-host-runtime/src/` falls into three categories.
+Existing host-runtime code should move behind SDK-safe library boundaries in
+phases.
 
-| Category | Modules | Notes |
+| Responsibility | Current home | Target owner |
 |---|---|---|
-| A: Extract verbatim | `src/protocol/*`, `src/network/{router,affinity,rewrite}`, `src/models/{catalog,capabilities,gguf}`, `src/crypto/{keys,mod}` pure parts | No semantic changes. Copy byte-for-byte, add re-export shim. |
-| B: Extract with rewrite | `src/network/{nostr,proxy,tunnel}`, `src/mesh/mod.rs` (~50%), `src/inference/{election}` (~60-70%) | I/O becomes trait-based. Filesystem and process calls are removed or abstracted. |
-| C: Host-only (stays in mesh-llm) | `src/{runtime,api,cli,system,plugin,plugins}/*`, `src/inference/launch.rs`, `src/crypto/{keystore,keychain}.rs`, `src/models/{local,resolve,maintenance}.rs` | Desktop-only. Not extracted. |
+| Client join, model list, chat, responses, cancel, reconnect | `mesh-client`, `mesh-llm-api-server` | `MeshNode::inference()` backed by `mesh-client` |
+| Model search, show, recommended, download | CLI/model modules in `mesh-llm-host-runtime` | `MeshNode::models()` backed by model-management library code |
+| Installed model scanning and cache status | `models/local.rs` and related host modules | `MeshNode::models()` |
+| Model delete, cleanup, derived-cache prune | CLI/model modules in `mesh-llm-host-runtime` | `MeshNode::models()` |
+| Runtime load, unload, served models, runtime status | host runtime-control loop through `mesh-llm-host-runtime::api::MeshApi` | `MeshNode::serving()` backed by the in-process `ServingController` trait |
+| Device policy and GPU inventory | host system/runtime modules | `MeshNode::serving()` and status APIs |
+| Protocol, routing, compatibility types | shared protocol/client/host modules | shared crates consumed by SDK and host runtime |
 
-Category B modules require the most care. The extraction recipe applies: failing test first, then minimal implementation, then re-export shim, then commit.
-
----
-
-## Out of Scope
-
-The following are explicitly excluded from this ADR and from all waves of this work:
-
-1. Browser SDK
-2. iOS host mode
-3. Android host mode
-4. Localhost HTTP proxy wrapper
-5. Plugin host in SDK
-6. Web console assets
-7. Nostr publishing from SDK
-8. Model download management from SDK
-
-Any future work on these items requires a separate ADR.
+Do not expose CLI parser types, terminal UI concerns, process-global config, or
+host-runtime internals as SDK types.
 
 ---
 
-## Mobile Platform Constraints
+## Platform Scope
 
-### App Store (iOS)
+Initial target:
 
-A `PrivacyInfo.xcprivacy` file is required and must be embedded inside the XCFramework bundle, not shipped separately. Apple's App Store review rejects frameworks that access privacy-sensitive APIs without a declared reason.
+- Rust SDK for embedded desktop/server applications
+- macOS serving support where the native runtime is available
+- Swift macOS bindings once the Rust node API is stable enough to wrap
+- Kotlin/JVM and Android client/model-management support where platform
+  constraints allow it
 
-### Android
+Out of initial serving scope:
 
-From August 2025, the Play Store requires 16KB page size alignment. All Android builds must pass the linker flag `-Wl,-z,max-page-size=16384`. This is a hard requirement, not optional.
+1. iOS serving mode
+2. Android serving mode
+3. Browser SDK
+4. Web console assets in the SDK
+5. Plugin host in the SDK
+6. Generic third-party model backend registration
 
-### iOS Backgrounding
+The SDK is not a generic LLM provider framework. It embeds mesh-llm's native
+model serving path behind product-level Mesh names.
 
-iOS suspends apps in the background. The `reconnect()` method exists specifically to re-establish the QUIC connection after the app returns to the foreground. App code must call `reconnect()` from a `UIApplication.willEnterForegroundNotification` observer. The SDK does not attempt automatic reconnection.
+---
 
-### Tokio Runtime
+## FFI Toolchain
 
-The embedded SDK runs a dedicated Tokio runtime on its own OS thread. Shutdown uses `runtime.shutdown_timeout(Duration::from_secs(5))` called from that dedicated thread. This avoids blocking the main thread and prevents the 5-second watchdog from triggering on iOS.
+`uniffi-rs v0.31+` remains the chosen FFI layer. It generates Swift and Kotlin
+bindings from a single Rust interface definition, supports async functions
+natively, and has an active maintenance track.
 
-### Credentials
+Language SDKs should stay thin:
 
-Credentials are passed by constructor (`OwnerKeypair` in `MeshClient::new` and `MeshHost::new`). The SDK never reads credentials from the filesystem. This is a hard constraint for App Store compliance and sandbox safety.
+- generated bindings map to the Rust node SDK
+- platform wrappers provide idiomatic event and async integration
+- shared behavior stays in Rust
+
+---
+
+## Credentials And Storage
+
+The SDK does not silently load credentials from host-global paths. The embedding
+application provides identity and persistence policy.
+
+The node builder should accept explicit paths or storage policy for:
+
+- model cache
+- runtime directory
+- metadata cache
+- logs
+- temporary derived artifacts
+
+Defaults are allowed for developer ergonomics on desktop platforms, but those
+defaults must be visible in status/config APIs and overridable by the caller.
 
 ---
 
@@ -175,33 +477,43 @@ Credentials are passed by constructor (`OwnerKeypair` in `MeshClient::new` and `
 The mesh-llm control plane supports two protocol versions:
 
 - `mesh-llm/0`: legacy JSON/raw payloads, preserved for backward compatibility
-- `mesh-llm/1`: protobuf framing with `meshllm.node.v1` schema, preferred for all new connections
+- `mesh-llm/1`: protobuf framing with `meshllm.node.v1` schema, preferred for
+  all new connections
 
-Both versions are already in production. Mixed meshes containing `/0` and `/1` nodes are supported today. The embedded client is a permanently supported client type and will negotiate the highest version the host supports.
+Mixed meshes containing `/0` and `/1` nodes are supported. SDK nodes are
+first-class mesh participants and must preserve that compatibility. Gossip
+fields, model descriptors, capability advertisements, stage/topology state, and
+stream types must remain additive unless an explicit breaking protocol revision
+is approved.
 
-The `mesh-llm/0` ↔ `mesh-llm/1` dual-support scheme is a compatibility guarantee for all embedded clients (iOS, macOS, Android). Embedded clients are not a transitional concern — they are a first-class, permanent part of the mesh-llm client ecosystem. Any change to `src/protocol/` that breaks embedded client compatibility is a breaking change and requires a new ADR revision before it may be merged.
-
-Any change to `src/protocol/` requires a backward-compatibility test before merging. This applies to both the existing mesh-llm binary and the new embedded SDK. Breaking the wire format without an explicit version bump is not acceptable.
+Any change to shared protocol, gossip, model capabilities, routing, or serving
+state requires backward-compatibility tests against released mesh nodes.
 
 ---
 
 ## Test Strategy
 
-All extraction work follows TDD:
+Extraction and SDK changes should keep the existing TDD discipline:
 
-1. **RED**: Write a failing test in the destination crate (`mesh-client`, `mesh-api-ffi`, etc.)
-2. **GREEN**: Copy the minimal implementation to make it pass
-3. **REFACTOR**: Clean up, remove duplication, add the transitional re-export shim in the source crate
+1. Write failing tests in the destination crate.
+2. Move or wrap the minimal implementation needed to pass.
+3. Remove duplicated behavior from CLI/runtime owners once library APIs exist.
 
-`FixtureMesh` in `mesh-llm-test-harness` has a hard cap: 1 struct, 3 public methods (`new`, `invite_token`, `Drop`), no traits, no generics. It exists to give tests a real mesh endpoint without pulling in the full mesh-llm binary.
+Minimum gates by change type:
 
-Wave-end gates run before any wave is considered complete:
+- client/inference SDK changes: `cargo test -p mesh-client -p mesh-llm-api-server`
+- FFI changes: `cargo test -p mesh-llm-ffi` plus Swift/Kotlin smoke where touched
+- model-management changes: model search/show/download/installed/delete tests
+- serving changes: runtime load/unload/status tests plus mixed-version protocol
+  checks when gossip or routing changes
+
+Before landing broad SDK API changes, run:
 
 ```bash
-just build && cargo test --workspace && cargo clippy --workspace -- -D warnings
+just build
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
 ```
-
-All three must exit 0. Clippy warnings are errors. No exceptions.
 
 ---
 
@@ -209,16 +521,28 @@ All three must exit 0. Clippy warnings are errors. No exceptions.
 
 ### Enables
 
-Native iOS, macOS, and Android apps can join mesh-llm meshes without localhost HTTP, sidecar processes, or CLI invocation. App developers get a typed Swift or Kotlin API backed by the same QUIC transport and protocol as the desktop binary.
+- Applications can embed one mesh node rather than stitching together a client,
+  CLI subprocesses, and management API calls.
+- Model management becomes part of the supported app integration story.
+- Local serving is designed as a first-class SDK role.
+- Swift/Kotlin bindings can expose one coherent node API instead of a
+  client-only surface that later grows incompatible host concepts.
 
 ### Costs
 
-- Ongoing maintenance of the FFI surface. Every API change must be reflected in the uniffi definition and regenerated bindings.
-- uniffi version pinning. Upgrading uniffi may require regenerating all bindings and updating consumer packages.
-- Extraction discipline. Category B modules require careful rewriting to remove I/O assumptions. Rushing this step risks subtle behavioral differences between the embedded client and the desktop binary.
+- The existing `MeshClient` SDK surface must be renamed or wrapped during
+  migration.
+- More host-runtime code must move behind library boundaries.
+- Model management APIs must define stable identities and deletion safety rules.
+- Serving APIs must make runtime state, device policy, and capability
+  advertisement explicit.
 
 ### Alternatives Rejected
 
-- **swift-bridge**: Rust-only. No Kotlin support. Would require a separate solution for Android, doubling the maintenance surface.
-- **diplomat**: Less mature, smaller ecosystem, fewer production deployments at the time of this decision.
-- **cbindgen**: C ABI only. No async support. Would require manual async bridging on both Swift and Kotlin sides, negating most of the benefit.
+- Keep a client-only SDK and add a separate serving SDK. Rejected because model
+  management, serving, and inference all share node identity, cache policy,
+  eventing, and mesh lifecycle.
+- Expose a generic third-party backend provider interface. Rejected for this SDK
+  phase; the product is Mesh model serving, not a general provider framework.
+- Leave model management as CLI-only. Rejected because an embedded serving app
+  must manage local models without shelling out to the CLI.

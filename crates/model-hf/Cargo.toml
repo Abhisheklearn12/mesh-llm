@@ -3,13 +3,16 @@ name = "model-hf"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+description = "Hugging Face model repository integration for Mesh LLM"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
 
 [dependencies]
 anyhow.workspace = true
 async-trait = "0.1"
-hf_hub = { package = "hf-hub", git = "https://github.com/huggingface/hf-hub.git", rev = "4cd6d8acd3192021381ff85210be9192b394e0eb", default-features = false, features = ["blocking"] }
-model-artifact = { path = "../model-artifact" }
-model-ref = { path = "../model-ref" }
+hf_hub = { package = "hf-hub", version = "1.0.0-rc.1", default-features = false, features = ["blocking"] }
+model-artifact = { path = "../model-artifact", version = "0.66.0" }
+model-ref = { path = "../model-ref", version = "0.66.0" }
 serde.workspace = true
 tokio = { version = "1", features = ["rt"] }
 

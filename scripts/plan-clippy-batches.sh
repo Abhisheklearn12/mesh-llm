@@ -22,9 +22,11 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-ui"
   "mesh-llm-plugin"
   "mesh-llm-client"
-  "mesh-api"
-  "mesh-host-core"
-  "mesh-api-ffi"
+  "mesh-llm-api-client"
+  "mesh-llm-api-server"
+  "mesh-llm-node"
+  "mesh-llm-ffi"
+  "mesh-llm-nodejs"
   "mesh-llm-test-harness"
   "model-ref"
   "model-artifact"
@@ -115,7 +117,7 @@ weights = {
     "mesh-llm": 10,
     "mesh-llm-host-runtime": 8,
     "mesh-llm-client": 6,
-    "mesh-api-ffi": 5,
+    "mesh-llm-ffi": 5,
     "skippy-server": 5,
     "skippy-runtime": 5,
     "skippy-correctness": 5,
@@ -126,7 +128,8 @@ weights = {
     "model-artifact": 4,
     "model-hf": 4,
     "model-resolver": 3,
-    "mesh-api": 3,
+    "mesh-llm-api-client": 1,
+    "mesh-llm-api-server": 3,
     "mesh-llm-gpu-bench": 3,
     "llama-spec-bench": 3,
     "skippy-prompt": 3,
@@ -136,7 +139,8 @@ weights = {
     "mesh-llm-types": 2,
     "mesh-llm-ui": 2,
     "mesh-llm-plugin": 2,
-    "mesh-host-core": 2,
+    "mesh-llm-node": 2,
+    "mesh-llm-nodejs": 2,
     "skippy-protocol": 2,
     "skippy-topology": 2,
     "skippy-cache": 2,

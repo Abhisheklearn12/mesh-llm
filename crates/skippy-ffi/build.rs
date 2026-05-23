@@ -155,7 +155,7 @@ fn main() {
     }
     println!("cargo:rustc-link-lib=static=ggml-base");
 
-    if target.contains("apple-darwin") {
+    if target.contains("apple") {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=framework=Accelerate");
         if static_archive_exists(
@@ -167,6 +167,11 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=Metal");
             println!("cargo:rustc-link-lib=framework=MetalKit");
         }
+    } else if target.contains("android") {
+        println!("cargo:rustc-link-lib=static=c++_static");
+        println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=log");
     } else if target.contains("linux") {
         println!("cargo:rustc-link-lib=stdc++");
         println!("cargo:rustc-link-lib=dylib=m");
@@ -199,7 +204,7 @@ fn main() {
 }
 
 fn default_build_dir(workspace_root: &std::path::Path, target: &str) -> std::path::PathBuf {
-    let suffix = if target.contains("apple-darwin") {
+    let suffix = if target.contains("apple") {
         "metal"
     } else {
         "cpu"

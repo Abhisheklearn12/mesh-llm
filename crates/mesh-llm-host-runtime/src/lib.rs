@@ -14,6 +14,8 @@ mod runtime;
 mod runtime_data;
 mod system;
 
+pub mod sdk;
+
 pub mod proto {
     pub use mesh_llm_protocol::proto::*;
 }

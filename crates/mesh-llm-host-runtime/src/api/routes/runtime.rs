@@ -10,6 +10,7 @@ use mesh_client::{
     ClientBuilder, ControlPlaneBootstrapOptions, ControlPlaneClientError, ControlPlaneConnection,
     InviteToken, OwnerControlRemoteError,
 };
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -619,7 +620,8 @@ async fn handle_unload_model(
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let _ = control_tx.send(RuntimeControlRequest::Unload {
-        target: model_name.clone(),
+        target: UnloadTarget::Model(model_name.clone()),
+        options: UnloadOptions::default(),
         resp: resp_tx,
     });
     match resp_rx.await {
@@ -658,7 +660,8 @@ async fn handle_unload_instance(
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let _ = control_tx.send(RuntimeControlRequest::Unload {
-        target: instance_id.clone(),
+        target: UnloadTarget::Instance(instance_id.clone()),
+        options: UnloadOptions::default(),
         resp: resp_tx,
     });
     match resp_rx.await {

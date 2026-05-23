@@ -147,6 +147,66 @@ jobs:
       mesh_binary_target: target/release/mesh-llm
       cache_key_prefix: release-
 
+  build_native_sdk_runtime:
+    name: Build native SDK runtime ${{ matrix.name }}
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS aarch64 Metal
+            os: macos-14
+            backend: metal
+            target: aarch64-apple-darwin
+            artifact_suffix: darwin-aarch64-metal
+          - name: Linux x86_64 CPU
+            os: ubuntu-latest
+            backend: cpu
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x86_64-cpu
+    env:
+      LLAMA_STAGE_BACKEND: ${{ matrix.backend }}
+      MESH_NATIVE_SDK_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build pkg-config libssl-dev libdbus-1-dev curl lld
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja lld
+
+      - name: Package native SDK runtime
+        run: |
+          scripts/package-native-sdk.sh \
+            --build \
+            --backend "${{ matrix.backend }}" \
+            --target "${{ matrix.target }}" \
+            --out dist/native-sdk
+
+      - name: Verify native SDK runtime artifact
+        run: scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
+
+      - name: Package native SDK runtime crate
+        run: scripts/package-native-sdk-crate.sh --out dist/native-sdk-crates dist/native-sdk/*.tar.gz
+
+      - name: Upload native SDK runtime
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-native-sdk-${{ matrix.artifact_suffix }}
+          path: |
+            dist/native-sdk/*.tar.gz
+            dist/native-sdk/*.sha256
+            dist/native-sdk-crates/*/target/package/*.crate
+          if-no-files-found: error
+
   build_linux_arm64:
     name: Build Linux ARM64 CPU
     needs: metadata
@@ -493,6 +553,7 @@ jobs:
       - metadata
       - build
       - inference_smoke_tests
+      - build_native_sdk_runtime
       - build_linux_arm64
       - build_linux_cuda
       - build_linux_cuda_blackwell
@@ -500,7 +561,7 @@ jobs:
       - build_linux_vulkan
       - build_windows_cpu
       - build_windows_gpu
-    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && needs.inference_smoke_tests.result == 'success' && needs.build_linux_arm64.result == 'success' && (needs.build_linux_cuda.result == 'success' || needs.build_linux_cuda.result == 'skipped') && (needs.build_linux_cuda_blackwell.result == 'success' || needs.build_linux_cuda_blackwell.result == 'skipped') && (needs.build_linux_rocm.result == 'success' || needs.build_linux_rocm.result == 'skipped') && (needs.build_linux_vulkan.result == 'success' || needs.build_linux_vulkan.result == 'skipped') && needs.build_windows_cpu.result == 'success' && (needs.build_windows_gpu.result == 'success' || needs.build_windows_gpu.result == 'skipped') }}
+    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && needs.inference_smoke_tests.result == 'success' && needs.build_native_sdk_runtime.result == 'success' && needs.build_linux_arm64.result == 'success' && (needs.build_linux_cuda.result == 'success' || needs.build_linux_cuda.result == 'skipped') && (needs.build_linux_cuda_blackwell.result == 'success' || needs.build_linux_cuda_blackwell.result == 'skipped') && (needs.build_linux_rocm.result == 'success' || needs.build_linux_rocm.result == 'skipped') && (needs.build_linux_vulkan.result == 'success' || needs.build_linux_vulkan.result == 'skipped') && needs.build_windows_cpu.result == 'success' && (needs.build_windows_gpu.result == 'success' || needs.build_windows_gpu.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Download release artifacts

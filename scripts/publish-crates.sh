@@ -104,6 +104,11 @@ unpublished_registry_deps() {
         model-artifact)
             printf '%s\n' model-ref
             ;;
+        model-hf)
+            printf '%s\n' \
+                model-artifact \
+                model-ref
+            ;;
         mesh-llm-client)
             printf '%s\n' \
                 model-artifact \
@@ -112,8 +117,21 @@ unpublished_registry_deps() {
                 mesh-llm-routing \
                 mesh-llm-types
             ;;
-        mesh-api)
-            printf '%s\n' mesh-llm-client
+        mesh-llm-api-client)
+            printf '%s\n' \
+                mesh-llm-client
+            ;;
+        mesh-llm-node)
+            printf '%s\n' \
+                mesh-llm-types \
+                model-artifact \
+                model-hf \
+                model-ref
+            ;;
+        mesh-llm-api-server)
+            printf '%s\n' \
+                mesh-llm-api-client \
+                mesh-llm-node
             ;;
     esac
 }
@@ -138,8 +156,11 @@ publish_crates=(
     mesh-llm-routing
     mesh-llm-types
     model-artifact
+    model-hf
     mesh-llm-client
-    mesh-api
+    mesh-llm-api-client
+    mesh-llm-node
+    mesh-llm-api-server
 )
 
 for index in "${!publish_crates[@]}"; do

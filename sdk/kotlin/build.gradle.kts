@@ -14,6 +14,10 @@ repositories {
     mavenCentral()
 }
 
+kotlin {
+    jvmToolchain(21)
+}
+
 dependencies {
     implementation(kotlin("stdlib"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
@@ -21,6 +25,27 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.8")
+}
+
+val repoRoot = rootProject.projectDir.parentFile.parentFile
+
+val generateKotlinBindings by tasks.registering(Exec::class) {
+    description = "Generate Kotlin UniFFI bindings from the mesh-llm FFI UDL"
+    group = "build"
+
+    workingDir = repoRoot
+    commandLine("bash", "sdk/kotlin/scripts/generate-kotlin-bindings.sh")
+    inputs.file(repoRoot.resolve("crates/mesh-llm-ffi/src/mesh_ffi.udl"))
+    outputs.file(projectDir.resolve("src/main/kotlin/uniffi/mesh_ffi/mesh_ffi.kt"))
+    outputs.file(projectDir.resolve("example/example-jvm/src/main/kotlin/uniffi/mesh_ffi/mesh_ffi.kt"))
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateKotlinBindings)
+}
+
+tasks.named("compileTestKotlin") {
+    dependsOn(generateKotlinBindings)
 }
 
 fun resolveAndroidNdkHome(): String {
@@ -65,14 +90,14 @@ fun resolveAndroidNdkHome(): String {
 
 // Task to build native libraries for all Android ABIs
 val buildNativeLibs by tasks.registering {
-    description = "Build mesh-api-ffi shared libraries for all Android ABIs"
+    description = "Build mesh-llm-ffi shared libraries with embedded serving for all Android ABIs"
     group = "build"
 
-    val repoRoot = rootProject.projectDir.parentFile.parentFile
+    val androidPlatform = System.getenv("MESH_LLM_ANDROID_PLATFORM") ?: "android-26"
     val buildTargets = listOf(
-        Triple("arm64-v8a", "aarch64-linux-android", "libmesh_ffi.so"),
-        Triple("armeabi-v7a", "armv7-linux-androideabi", "libmesh_ffi.so"),
-        Triple("x86_64", "x86_64-linux-android", "libmesh_ffi.so"),
+        Triple("arm64-v8a", "aarch64-linux-android", "libmeshllm_ffi.so"),
+        Triple("armeabi-v7a", "armv7-linux-androideabi", "libmeshllm_ffi.so"),
+        Triple("x86_64", "x86_64-linux-android", "libmeshllm_ffi.so"),
     )
 
     doLast {
@@ -86,37 +111,73 @@ val buildNativeLibs by tasks.registering {
             baseEnv["RUSTC"] = rustc
         }
 
+        exec {
+            workingDir = repoRoot
+            commandLine(
+                "bash",
+                "scripts/prepare-llama.sh",
+                System.getenv("MESH_LLM_LLAMA_PIN_SHA") ?: "pinned"
+            )
+        }
+
         buildTargets.forEach { (abi, target, _) ->
+            val llamaBuildDir = repoRoot.resolve(".deps/llama-build/build-stage-abi-android-$abi-cpu")
             exec {
                 workingDir = repoRoot
                 environment(baseEnv)
+                environment(
+                    mapOf(
+                        "LLAMA_STAGE_BACKEND" to "cpu",
+                        "LLAMA_STAGE_BUILD_DIR" to llamaBuildDir.absolutePath,
+                        "LLAMA_BUILD_DIR" to llamaBuildDir.absolutePath,
+                    )
+                )
+                commandLine(
+                    "bash",
+                    "scripts/build-llama.sh",
+                    "-DCMAKE_TOOLCHAIN_FILE=$ndkHome/build/cmake/android.toolchain.cmake",
+                    "-DANDROID_ABI=$abi",
+                    "-DANDROID_PLATFORM=$androidPlatform",
+                )
+            }
+
+            exec {
+                workingDir = repoRoot
+                environment(baseEnv)
+                environment(
+                    mapOf(
+                        "LLAMA_STAGE_BACKEND" to "cpu",
+                        "LLAMA_STAGE_BUILD_DIR" to llamaBuildDir.absolutePath,
+                    )
+                )
                 commandLine(
                     "cargo", "ndk",
                     "-t", abi,
                     "build",
                     "--release",
-                    "-p", "mesh-api-ffi",
-                    "--no-default-features"
+                    "-p", "mesh-llm-ffi",
+                    "--no-default-features",
+                    "--features", "host,embedded-runtime"
                 )
             }
 
             copy {
-                from(repoRoot.resolve("target/$target/release/libmesh_ffi.so"))
+                from(repoRoot.resolve("target/$target/release/libmeshllm_ffi.so"))
                 into(projectDir.resolve("src/main/jniLibs/$abi"))
             }
         }
     }
 
     outputs.files(
-        "${projectDir}/src/main/jniLibs/arm64-v8a/libmesh_ffi.so",
-        "${projectDir}/src/main/jniLibs/armeabi-v7a/libmesh_ffi.so",
-        "${projectDir}/src/main/jniLibs/x86_64/libmesh_ffi.so"
+        "${projectDir}/src/main/jniLibs/arm64-v8a/libmeshllm_ffi.so",
+        "${projectDir}/src/main/jniLibs/armeabi-v7a/libmeshllm_ffi.so",
+        "${projectDir}/src/main/jniLibs/x86_64/libmeshllm_ffi.so"
     )
 }
 
 // Assemble a distributable AAR artifact (ZIP format) containing:
 //   classes.jar              — compiled Kotlin classes
-//   jni/<abi>/libmesh_ffi.so — native shared libraries
+//   jni/<abi>/libmeshllm_ffi.so — native shared libraries
 //   consumer-proguard-rules.pro
 //   AndroidManifest.xml      — minimal manifest required by AAR spec
 val assembleAar by tasks.registering(Zip::class) {
@@ -150,6 +211,7 @@ val sourcesJar by tasks.registering(Jar::class) {
     description = "Assemble Kotlin sources jar for Maven publication"
     group = "build"
 
+    dependsOn(generateKotlinBindings)
     archiveClassifier.set("sources")
     from("src/main/kotlin")
 }
@@ -168,7 +230,7 @@ publishing {
 
             pom {
                 name.set("MeshLLM Android SDK")
-                description.set("Android/Kotlin bindings for connecting to mesh-llm meshes.")
+                description.set("Android/Kotlin bindings for mesh-llm model management, local serving, and mesh inference.")
                 url.set("https://github.com/Mesh-LLM/mesh-llm")
 
                 licenses {

@@ -1,0 +1,27 @@
+[package]
+name = "mesh-llm-nodejs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node.js native addon for the Mesh LLM SDK"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+
+[lib]
+name = "mesh_llm_nodejs"
+crate-type = ["cdylib"]
+
+[features]
+default = ["embedded-runtime"]
+embedded-runtime = ["mesh-llm-host-runtime"]
+
+[dependencies]
+mesh-llm-api-server = { path = "../mesh-llm-api-server", version = "0.66.0" }
+mesh-llm-host-runtime = { path = "../mesh-llm-host-runtime", default-features = false, optional = true }
+napi = { version = "2.16.17", features = ["napi4", "tokio_rt"] }
+napi-derive = "2.16.13"
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[build-dependencies]
+napi-build = "2.1.6"

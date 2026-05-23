@@ -20,7 +20,7 @@ set -euo pipefail
 MESH_LLM="${1:?Usage: $0 <mesh-llm-binary>}"
 CONSOLE_PORT=3132        # avoid clashing with other CI steps
 API_PORT=9338
-MAX_WAIT=120             # seconds — generous for Nostr discovery + join attempt
+MAX_WAIT="${MESH_LLM_CLIENT_AUTO_MAX_WAIT:-300}" # seconds for public Nostr discovery + join attempt
 LOG=/tmp/mesh-llm-client-auto.log
 
 echo "=== CI Client-Auto Test ==="

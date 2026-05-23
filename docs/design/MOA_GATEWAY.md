@@ -4,8 +4,8 @@ Fan out requests to multiple heterogeneous LLM endpoints in parallel,
 arbitrate responses with deterministic logic, manage tool call lifecycles,
 and return one coherent OpenAI-compatible response.
 
-**Crate:** `crates/mesh-mixture-of-agents/`  
-**Virtual model:** `model: "mesh"` (not advertised in `/v1/models`)  
+**Crate:** `crates/mesh-mixture-of-agents/`
+**Virtual model:** `model: "mesh"` (not advertised in `/v1/models`)
 **Status:** Integrated into mesh proxy, live-tested with mesh peers
 
 ---

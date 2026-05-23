@@ -13,6 +13,8 @@ type CancelFlagMap =
     Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<dyn crate::events::EventListener>)>>>;
 
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+const MISSING_API_BASE_URL_ERROR: &str =
+    "MESH_CLIENT_API_BASE or ClientBuilder::with_api_base_url is required for inference";
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -91,9 +93,7 @@ impl ClientBuilder {
             config: self.config,
             connected: false,
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
-            listeners: Arc::new(Mutex::new(
-                Vec::<Arc<dyn crate::events::EventListener>>::new(),
-            )),
+            listeners: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempts: 0,
             user_disconnected: false,
         })
@@ -105,7 +105,7 @@ pub struct MeshClient {
     pub(crate) config: ClientConfig,
     pub(crate) connected: bool,
     pub(crate) cancel_flags: CancelFlagMap,
-    pub listeners: Arc<Mutex<Vec<Arc<dyn crate::events::EventListener>>>>,
+    pub listeners: Arc<Mutex<HashMap<String, Arc<dyn crate::events::EventListener>>>>,
     pub reconnect_attempts: u32,
     pub user_disconnected: bool,
 }
@@ -124,18 +124,15 @@ impl MeshClient {
     /// List available models on the mesh.
     pub async fn list_models(&self) -> Result<Vec<Model>, ClientError> {
         let Some(base_url) = self.config.api_base_url.as_deref() else {
-            return Ok(vec![]);
+            return Err(ClientError::Endpoint(
+                MISSING_API_BASE_URL_ERROR.to_string(),
+            ));
         };
 
-        let response = self
-            .runtime
-            .handle()
-            .block_on(http_get_json::<ModelsResponse>(
-                base_url,
-                "/v1/models",
-                &self.config.user_agent,
-            ))
-            .map_err(ClientError::Endpoint)?;
+        let response =
+            http_get_json::<ModelsResponse>(base_url, "/v1/models", &self.config.user_agent)
+                .await
+                .map_err(ClientError::Endpoint)?;
 
         Ok(response
             .data
@@ -208,8 +205,9 @@ impl MeshClient {
                     }
                 }
             } else if !cancel_flag.load(Ordering::Relaxed) {
-                listener.on_event(crate::events::Event::Completed {
+                listener.on_event(crate::events::Event::Failed {
                     request_id: id_clone,
+                    error: MISSING_API_BASE_URL_ERROR.to_string(),
                 });
             }
         });
@@ -276,8 +274,9 @@ impl MeshClient {
                     }
                 }
             } else if !cancel_flag.load(Ordering::Relaxed) {
-                listener.on_event(crate::events::Event::Completed {
+                listener.on_event(crate::events::Event::Failed {
                     request_id: id_clone,
+                    error: MISSING_API_BASE_URL_ERROR.to_string(),
                 });
             }
         });
@@ -323,8 +322,28 @@ impl MeshClient {
         self.join().await
     }
 
+    pub fn add_event_listener(&self, listener: Arc<dyn crate::events::EventListener>) -> String {
+        let listener_id = uuid::Uuid::new_v4().to_string();
+        self.listeners
+            .lock()
+            .unwrap()
+            .insert(listener_id.clone(), listener);
+        listener_id
+    }
+
+    pub fn remove_event_listener(&self, listener_id: &str) {
+        self.listeners.lock().unwrap().remove(listener_id);
+    }
+
     fn emit_event(&self, event: crate::events::Event) {
-        for listener in self.listeners.lock().unwrap().iter() {
+        let listeners = self
+            .listeners
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for listener in listeners {
             listener.on_event(event.clone());
         }
     }

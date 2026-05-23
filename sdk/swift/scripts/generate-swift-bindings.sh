@@ -48,7 +48,7 @@ fn main() -> Result<()> {
         generate_swift_sources: true,
         generate_headers: true,
         generate_modulemap: true,
-        source: Utf8PathBuf::from("$REPO_ROOT/crates/mesh-api-ffi/src/mesh_ffi.udl"),
+        source: Utf8PathBuf::from("$REPO_ROOT/crates/mesh-llm-ffi/src/mesh_ffi.udl"),
         out_dir,
         xcframework: false,
         module_name: Some("$FFI_MODULE_NAME".into()),
@@ -64,7 +64,9 @@ cargo run --manifest-path "$RUNNER_DIR/Cargo.toml"
 
 cp "$OUT_DIR/mesh_ffi.swift" "$SWIFT_SOURCE_DIR/mesh_ffi.swift"
 perl -0pi -e 's/#if canImport\(mesh_ffiFFI\)/#if canImport('"$FFI_MODULE_NAME"')/g; s/import mesh_ffiFFI/import '"$FFI_MODULE_NAME"'/g' "$SWIFT_SOURCE_DIR/mesh_ffi.swift"
+perl -pi -e 's/[ \t]+$//' "$SWIFT_SOURCE_DIR/mesh_ffi.swift"
 cp "$OUT_DIR/$UNIFFI_HEADER_SOURCE" "$FFI_DIR/$FFI_HEADER_NAME"
+perl -pi -e 's/[ \t]+$//' "$FFI_DIR/$FFI_HEADER_NAME"
 cat > "$FFI_DIR/$FFI_MODULEMAP_NAME" <<EOF
 framework module $FFI_MODULE_NAME {
   header "$FFI_HEADER_NAME"
