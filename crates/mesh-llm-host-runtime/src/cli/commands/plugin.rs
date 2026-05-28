@@ -21,7 +21,6 @@ pub(crate) async fn run_plugin_command(command: &PluginCommand, cli: &Cli) -> Re
         PluginCommand::Info { name } => info(name)?,
         PluginCommand::Search { query } => search(query.as_deref()).await?,
         PluginCommand::List => list(cli)?,
-        PluginCommand::Mcp => runtime::run_plugin_mcp(cli).await?,
     }
     Ok(())
 }

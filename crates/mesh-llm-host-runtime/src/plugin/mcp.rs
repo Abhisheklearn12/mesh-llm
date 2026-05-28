@@ -14,7 +14,10 @@ use rmcp::{
         SubscribeRequestParams, UnsubscribeRequestParams,
     },
     service::{NotificationContext, Peer, RequestContext, RunningService},
-    transport::{StreamableHttpClientTransport, TokioChildProcess, io::stdio},
+    transport::streamable_http_server::{
+        StreamableHttpService, session::local::LocalSessionManager,
+    },
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -1318,21 +1321,40 @@ impl ServerHandler for PluginMcpServer {
     }
 }
 
-pub async fn run_mcp_server(plugin_manager: PluginManager) -> Result<()> {
-    let bridge = ActiveBridge::default();
-    plugin_manager
-        .set_rpc_bridge(Some(Arc::new(bridge.clone())))
-        .await;
+#[derive(Clone)]
+pub(crate) struct PluginMcpHttpEndpoint {
+    plugin_manager: PluginManager,
+    bridge: ActiveBridge,
+    session_manager: Arc<LocalSessionManager>,
+}
 
-    let result = async {
-        let server = PluginMcpServer::new(plugin_manager.clone(), bridge);
-        server.serve(stdio()).await?.waiting().await?;
-        Ok::<(), anyhow::Error>(())
+impl PluginMcpHttpEndpoint {
+    pub(crate) fn new(plugin_manager: PluginManager) -> Self {
+        Self {
+            plugin_manager,
+            bridge: ActiveBridge::default(),
+            session_manager: Arc::new(LocalSessionManager::default()),
+        }
     }
-    .await;
 
-    plugin_manager.set_rpc_bridge(None).await;
-    result
+    pub(crate) async fn handle(
+        &self,
+        request: http::Request<http_body_util::Full<bytes::Bytes>>,
+    ) -> http::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>>
+    {
+        self.plugin_manager
+            .set_rpc_bridge(Some(Arc::new(self.bridge.clone())))
+            .await;
+
+        let plugin_manager = self.plugin_manager.clone();
+        let bridge = self.bridge.clone();
+        let service = StreamableHttpService::new(
+            move || Ok(PluginMcpServer::new(plugin_manager.clone(), bridge.clone())),
+            self.session_manager.clone(),
+            Default::default(),
+        );
+        service.handle(request).await
+    }
 }
 
 fn internal_error(err: impl std::fmt::Display) -> ErrorData {
