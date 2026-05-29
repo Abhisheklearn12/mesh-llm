@@ -515,6 +515,7 @@ fn runtime_verified_served_model_descriptor(
         capabilities_known: false,
         capabilities: models::ModelCapabilities::default(),
         topology: None,
+        metadata: crate::models::served_model_metadata_for_model(model_name),
     });
     descriptor.identity.model_name = model_name.to_string();
     descriptor.identity.is_primary = model_name == primary_model_name;
@@ -3996,6 +3997,7 @@ max_tokens = 222
             capabilities_known: false,
             capabilities: models::ModelCapabilities::default(),
             topology: None,
+            metadata: None,
         };
         let capabilities = models::ModelCapabilities {
             multimodal: true,

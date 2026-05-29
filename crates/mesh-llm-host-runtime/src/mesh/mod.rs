@@ -7,8 +7,9 @@
 
 pub use mesh_llm_types::mesh::{
     DEMAND_TTL_SECS, MAX_SPLIT_RTT_MS, ModelDemand, ModelRuntimeDescriptor, ModelSourceKind,
-    ServedModelDescriptor, ServedModelIdentity, infer_available_model_descriptors,
-    infer_local_served_model_descriptor, infer_served_model_descriptors, merge_demand,
+    ServedModelDescriptor, ServedModelIdentity, ServedModelMetadata,
+    infer_available_model_descriptors, infer_local_served_model_descriptor,
+    infer_served_model_descriptors, merge_demand,
 };
 
 use anyhow::{Context, Result};
@@ -934,6 +935,7 @@ fn infer_remote_served_descriptors(
                 capabilities_known: false,
                 capabilities: crate::models::ModelCapabilities::default(),
                 topology: None,
+                metadata: None,
             }
         })
         .collect()
@@ -1126,6 +1128,7 @@ fn descriptor_from_identity(
         capabilities_known: true,
         capabilities,
         topology,
+        metadata: crate::models::served_model_metadata_for_path(model_name, &path),
     }
 }
 
@@ -1247,7 +1250,8 @@ fn model_descriptor_score(descriptor: &ServedModelDescriptor) -> u8 {
         + u8::from(descriptor.capabilities.vision != crate::models::CapabilityLevel::None)
         + u8::from(descriptor.capabilities.reasoning != crate::models::CapabilityLevel::None)
         + u8::from(descriptor.capabilities.tool_use != crate::models::CapabilityLevel::None);
-    model_identity_score(identity) + capability_bonus
+    let metadata_bonus = u8::from(descriptor.metadata.is_some());
+    model_identity_score(identity) + capability_bonus + metadata_bonus
 }
 
 fn upsert_mesh_catalog_descriptor(
@@ -3909,6 +3913,34 @@ impl Node {
         self.served_model_descriptors.lock().await.clone()
     }
 
+    pub async fn all_served_model_descriptors(&self) -> Vec<ServedModelDescriptor> {
+        let mut descriptors = self.served_model_descriptors.lock().await.clone();
+        let peer_descriptors = {
+            let state = self.state.lock().await;
+            state
+                .peers
+                .values()
+                .flat_map(|peer| peer.served_model_descriptors.clone())
+                .collect::<Vec<_>>()
+        };
+        descriptors.extend(peer_descriptors);
+        descriptors
+    }
+
+    pub async fn all_model_runtime_descriptors(&self) -> Vec<ModelRuntimeDescriptor> {
+        let mut runtimes = self.model_runtime_descriptors.lock().await.clone();
+        let peer_runtimes = {
+            let state = self.state.lock().await;
+            state
+                .peers
+                .values()
+                .flat_map(|peer| peer.served_model_runtime.clone())
+                .collect::<Vec<_>>()
+        };
+        runtimes.extend(peer_runtimes);
+        runtimes
+    }
+
     pub async fn serving_models(&self) -> Vec<String> {
         self.serving_models.lock().await.clone()
     }
@@ -3943,11 +3975,18 @@ impl Node {
             Vec::new()
         };
         for descriptor in &mut descriptors {
+            if descriptor.metadata.is_none() {
+                descriptor.metadata =
+                    crate::models::served_model_metadata_for_model(&descriptor.identity.model_name);
+            }
             if let Some(existing) = existing_by_name.get(&descriptor.identity.model_name) {
                 descriptor.capabilities = existing.capabilities;
                 descriptor.capabilities_known = existing.capabilities_known;
                 if existing.topology.is_some() {
                     descriptor.topology = existing.topology.clone();
+                }
+                if existing.metadata.is_some() {
+                    descriptor.metadata = existing.metadata.clone();
                 }
             }
         }

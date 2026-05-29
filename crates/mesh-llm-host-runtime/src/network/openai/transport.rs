@@ -2739,6 +2739,13 @@ pub(crate) fn capabilities_for_model(
         .unwrap_or_else(|| crate::models::installed_model_capabilities(model))
 }
 
+pub(crate) fn descriptor_metadata_for_model<'a>(
+    model: &str,
+    descriptors: &'a [mesh::ServedModelDescriptor],
+) -> Option<&'a mesh::ServedModelMetadata> {
+    descriptor_for_model(descriptors, model).and_then(|descriptor| descriptor.metadata.as_ref())
+}
+
 fn capture_path_for_request(request: &BufferedHttpRequest) -> &str {
     &request.client_path
 }
@@ -2785,8 +2792,10 @@ pub async fn handle_mesh_request(
     // Handle /v1/models
     if is_models_list_request(&request.method, &request.path) {
         let served = node.models_being_served().await;
-        let descriptors = node.served_model_descriptors().await;
-        let _ = send_models_list_with_descriptors(tcp_stream, &served, &descriptors).await;
+        let descriptors = node.all_served_model_descriptors().await;
+        let runtimes = node.all_model_runtime_descriptors().await;
+        let _ =
+            send_models_list_with_descriptors(tcp_stream, &served, &descriptors, &runtimes).await;
         return;
     }
 
@@ -2847,7 +2856,7 @@ async fn build_mesh_request_plan(
     affinity: &AffinityRouter,
 ) -> std::result::Result<MeshRequestPlan, MeshRequestFailure> {
     let served = node.models_being_served().await;
-    let descriptors = node.served_model_descriptors().await;
+    let descriptors = node.all_served_model_descriptors().await;
     rewrite_public_model_alias(request, &served, &descriptors);
 
     let is_auto_request =
@@ -3325,6 +3334,8 @@ async fn resolve_auto_model_request(
             router::RoutingCandidate {
                 name: name.as_str(),
                 caps,
+                parameter_count_b: descriptor_metadata_for_model(name, descriptors)
+                    .and_then(|metadata| metadata.parameter_count_b),
                 tps_hint,
                 throughput_samples,
             }
@@ -3959,8 +3970,9 @@ pub async fn send_models_list_with_descriptors(
     mut stream: TcpStream,
     models: &[String],
     descriptors: &[mesh::ServedModelDescriptor],
+    runtimes: &[mesh::ModelRuntimeDescriptor],
 ) -> std::io::Result<()> {
-    let body = models_list_json(models, descriptors).to_string();
+    let body = models_list_json(models, descriptors, runtimes).to_string();
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
         body.len(),
@@ -3974,6 +3986,7 @@ pub async fn send_models_list_with_descriptors(
 fn models_list_json(
     models: &[String],
     descriptors: &[mesh::ServedModelDescriptor],
+    runtimes: &[mesh::ModelRuntimeDescriptor],
 ) -> serde_json::Value {
     let mut seen = std::collections::HashSet::new();
     let data: Vec<serde_json::Value> = models
@@ -4006,7 +4019,7 @@ fn models_list_json(
             } else {
                 public_id.clone()
             };
-            Some(serde_json::json!({
+            let mut model = serde_json::json!({
                 "id": public_id,
                 "display_name": display_name,
                 "object": "model",
@@ -4016,11 +4029,82 @@ fn models_list_json(
                 "vision_status": capabilities.vision_status(),
                 "audio_status": capabilities.audio_status(),
                 "reasoning_status": capabilities.reasoning_status(),
-            }))
+            });
+            if let Some(metadata) = model_metadata_json(m, descriptor, runtimes)
+                && let Some(object) = model.as_object_mut()
+            {
+                object.insert("metadata".to_string(), metadata);
+            }
+            Some(model)
         })
         .collect();
 
     serde_json::json!({ "object": "list", "data": data })
+}
+
+fn model_metadata_json(
+    model_name: &str,
+    descriptor: Option<&mesh::ServedModelDescriptor>,
+    runtimes: &[mesh::ModelRuntimeDescriptor],
+) -> Option<serde_json::Value> {
+    let mut metadata = serde_json::Map::new();
+    let descriptor_metadata = descriptor.and_then(|descriptor| descriptor.metadata.as_ref());
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.architecture.as_ref()) {
+        metadata.insert("architecture".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.parameter_size.as_ref()) {
+        metadata.insert("parameter_size".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.parameter_count_b)
+        && value.is_finite()
+    {
+        metadata.insert("parameter_count_b".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.quant.as_ref()) {
+        metadata.insert("quant".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = runtime_context_length_for_model(model_name, runtimes) {
+        metadata.insert("context_length".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.native_context_length) {
+        metadata.insert(
+            "native_context_length".to_string(),
+            serde_json::json!(value),
+        );
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.tokenizer.as_ref()) {
+        metadata.insert("tokenizer".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.layer_count) {
+        metadata.insert("layer_count".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.embedding_size) {
+        metadata.insert("embedding_size".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.head_count) {
+        metadata.insert("head_count".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.kv_head_count) {
+        metadata.insert("kv_head_count".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.expert_count) {
+        metadata.insert("expert_count".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.active_expert_count) {
+        metadata.insert("active_expert_count".to_string(), serde_json::json!(value));
+    }
+    (!metadata.is_empty()).then_some(serde_json::Value::Object(metadata))
+}
+
+fn runtime_context_length_for_model(
+    model_name: &str,
+    runtimes: &[mesh::ModelRuntimeDescriptor],
+) -> Option<u32> {
+    runtimes
+        .iter()
+        .filter(|runtime| runtime.model_name == model_name)
+        .filter_map(mesh::ModelRuntimeDescriptor::advertised_context_length)
+        .max()
 }
 
 pub fn rewrite_public_model_alias(
@@ -4676,7 +4760,7 @@ mod tests {
         let models = vec!["Falcon-H1-1.5B-Instruct-Q4_K_M".to_string()];
         let descriptors = vec![hf_descriptor(&models[0])];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
 
         assert_eq!(
             body["data"][0]["id"],
@@ -4727,7 +4811,7 @@ mod tests {
         };
         let descriptors = vec![descriptor];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
         let public_id = body["data"][0]["id"].as_str().unwrap_or_default();
 
         // The public ID must NOT silently drop the quant suffix that the
@@ -4750,7 +4834,7 @@ mod tests {
         let models = vec!["Falcon-H1-1.5B-Instruct-Q4_K_M".to_string()];
         let descriptors = vec![catalog_model_ref_descriptor(&models[0])];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
 
         assert_eq!(
             body["data"][0]["id"],
@@ -4763,10 +4847,53 @@ mod tests {
         let models = vec!["smollm2-a".to_string()];
         let descriptors = vec![local_gguf_descriptor(&models[0])];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
 
         assert_eq!(body["data"][0]["id"], "smollm2-a");
         assert_eq!(body["data"][0]["display_name"], "smollm2-a");
+    }
+
+    #[test]
+    fn models_list_reports_model_metadata() {
+        let models = vec!["Qwen3-32B-Q4_K_M".to_string()];
+        let mut descriptor = local_gguf_descriptor(&models[0]);
+        descriptor.metadata = Some(mesh::ServedModelMetadata {
+            architecture: Some("qwen3".to_string()),
+            parameter_size: Some("32B".to_string()),
+            parameter_count_b: Some(32.0),
+            quant: Some("Q4_K_M".to_string()),
+            native_context_length: Some(32_768),
+            tokenizer: Some("gpt2".to_string()),
+            layer_count: Some(64),
+            embedding_size: Some(5120),
+            head_count: Some(40),
+            kv_head_count: Some(8),
+            expert_count: Some(128),
+            active_expert_count: Some(8),
+        });
+        let runtimes = vec![mesh::ModelRuntimeDescriptor {
+            model_name: models[0].clone(),
+            identity_hash: None,
+            context_length: Some(65_536),
+            ready: true,
+        }];
+
+        let body = models_list_json(&models, &[descriptor], &runtimes);
+        let metadata = &body["data"][0]["metadata"];
+
+        assert_eq!(metadata["architecture"], "qwen3");
+        assert_eq!(metadata["parameter_size"], "32B");
+        assert_eq!(metadata["parameter_count_b"], 32.0);
+        assert_eq!(metadata["quant"], "Q4_K_M");
+        assert_eq!(metadata["context_length"], 65_536);
+        assert_eq!(metadata["native_context_length"], 32_768);
+        assert_eq!(metadata["tokenizer"], "gpt2");
+        assert_eq!(metadata["layer_count"], 64);
+        assert_eq!(metadata["embedding_size"], 5120);
+        assert_eq!(metadata["head_count"], 40);
+        assert_eq!(metadata["kv_head_count"], 8);
+        assert_eq!(metadata["expert_count"], 128);
+        assert_eq!(metadata["active_expert_count"], 8);
     }
 
     #[test]
@@ -4777,7 +4904,7 @@ mod tests {
             crate::models::ModelCapabilities::default(),
         )];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
 
         assert_eq!(body["data"][0]["capabilities"], serde_json::json!(["text"]));
         assert_eq!(body["data"][0]["vision_status"], "none");
@@ -4789,7 +4916,7 @@ mod tests {
         let models = vec!["Qwen3VL-2B-Instruct-Q4_K_M".to_string()];
         let descriptors = vec![local_gguf_descriptor(&models[0])];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
         let capabilities = body["data"][0]["capabilities"].as_array().unwrap();
 
         assert!(capabilities.iter().any(|cap| cap == "multimodal"));
@@ -4810,7 +4937,7 @@ mod tests {
             },
         )];
 
-        let body = models_list_json(&models, &descriptors);
+        let body = models_list_json(&models, &descriptors, &[]);
         let capabilities = body["data"][0]["capabilities"].as_array().unwrap();
 
         assert!(capabilities.iter().any(|cap| cap == "multimodal"));

@@ -289,6 +289,7 @@ async fn set_serving_models_preserves_existing_known_descriptor_capabilities_whe
             ..Default::default()
         },
         topology: None,
+        metadata: None,
     })
     .await;
 
@@ -3275,6 +3276,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
         vocab_size: 151936,
         embedding_size: 4096,
         head_count: 32,
+        kv_head_count: 0,
         layer_count: 36,
         feed_forward_length: 14336,
         key_length: 128,
@@ -3288,6 +3290,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
         expert_count: 0,
         used_expert_count: 0,
         quantization_type: "Q4_K_M".to_string(),
+        parameter_size: None,
     };
 
     let mut model_sizes = HashMap::new();
@@ -3343,6 +3346,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
             capabilities_known: true,
             capabilities: crate::models::ModelCapabilities::default(),
             topology: None,
+            metadata: None,
         }],
         served_model_runtime: vec![ModelRuntimeDescriptor {
             model_name: "Qwen3-8B-Q4_K_M".to_string(),
@@ -3493,6 +3497,7 @@ fn proto_ann_to_local_treats_missing_default_capability_provenance_as_unknown() 
             capabilities: Some(crate::proto::node::ModelCapabilities::default()),
             capabilities_known: None,
             topology: None,
+            metadata: None,
         }],
         ..Default::default()
     };
@@ -3581,6 +3586,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         vocab_size: 32000,
         embedding_size: 4096,
         head_count: 32,
+        kv_head_count: 0,
         layer_count: 32,
         feed_forward_length: 11008,
         key_length: 128,
@@ -3594,6 +3600,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         expert_count: 0,
         used_expert_count: 0,
         quantization_type: "Q4_K_M".to_string(),
+        parameter_size: None,
     };
 
     let mut new_sizes = HashMap::new();
@@ -4578,6 +4585,7 @@ fn remote_model_scans_are_ignored_after_gossip() {
         vocab_size: 128256,
         embedding_size: 8192,
         head_count: 64,
+        kv_head_count: 0,
         layer_count: 80,
         feed_forward_length: 28672,
         key_length: 128,
@@ -4591,6 +4599,7 @@ fn remote_model_scans_are_ignored_after_gossip() {
         expert_count: 0,
         used_expert_count: 0,
         quantization_type: "Q4_K_M".to_string(),
+        parameter_size: None,
     };
     let mut model_sizes = std::collections::HashMap::new();
     model_sizes.insert("Llama-3.3-70B-Q4_K_M".to_string(), 42_000_000_000u64);
