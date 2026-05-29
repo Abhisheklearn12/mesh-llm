@@ -172,7 +172,38 @@ probe_nvidia() {
     command -v nvidia-smi >/dev/null 2>&1 ||
         command -v nvcc >/dev/null 2>&1 ||
         [[ -e /dev/nvidiactl ]] ||
-        [[ -d /proc/driver/nvidia/gpus ]]
+        [[ -d /proc/driver/nvidia/gpus ]] ||
+        probe_tegra_nvidia
+}
+
+tegra_model_text() {
+    if [[ -n "${MESH_LLM_TEST_TEGRA_MODEL:-}" ]]; then
+        printf '%s\n' "$MESH_LLM_TEST_TEGRA_MODEL"
+        return 0
+    fi
+
+    local path
+    for path in \
+        /proc/device-tree/model \
+        /proc/device-tree/compatible \
+        /sys/firmware/devicetree/base/model \
+        /sys/firmware/devicetree/base/compatible; do
+        [[ -r "$path" ]] || continue
+        tr '\0' '\n' <"$path" 2>/dev/null || true
+        printf '\n'
+    done
+}
+
+probe_tegra_nvidia() {
+    local model
+    model="$(tegra_model_text | tr '[:lower:]' '[:upper:]')"
+    case "$model" in
+        *JETSON*|*TEGRA*|*ORIN*|*NVGPU*|*THOR*)
+            return 0
+            ;;
+    esac
+
+    [[ -e /dev/nvhost-gpu ]] || [[ -e /dev/nvhost-ctrl-gpu ]]
 }
 
 normalize_cuda_sm() {
@@ -201,31 +232,6 @@ nvidia_model_is_blackwell() {
     esac
 }
 
-probe_cuda_blackwell() {
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        local raw
-        while IFS= read -r raw; do
-            if is_blackwell_cuda_sm "$raw"; then
-                return 0
-            fi
-        done < <(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true)
-    fi
-
-    if [[ -d /proc/driver/nvidia/gpus ]]; then
-        local info
-        for info in /proc/driver/nvidia/gpus/*/information; do
-            [[ -f "$info" ]] || continue
-            local model
-            model="$(sed -n 's/^Model:[[:space:]]*//p' "$info" | head -n 1)"
-            if [[ -n "$model" ]] && nvidia_model_is_blackwell "$model"; then
-                return 0
-            fi
-        done
-    fi
-
-    return 1
-}
-
 probe_rocm() {
     command -v rocm-smi >/dev/null 2>&1 ||
         command -v rocminfo >/dev/null 2>&1 ||
@@ -251,6 +257,12 @@ probe_vulkan() {
     return 1
 }
 
+probe_tegra() {
+    # Detect NVIDIA Tegra / Jetson SoC accelerators (Orin AGX, Orin NX, Xavier, etc.)
+    # These are typically Linux aarch64 devices with an integrated NVIDIA GPU.
+    [[ -f /proc/device-tree/model ]] && grep -qi "tegra\|jetson" /proc/device-tree/model
+}
+
 supported_flavors() {
     case "$(platform_support_status)" in
         supported)
@@ -259,10 +271,10 @@ supported_flavors() {
             echo "metal"
             ;;
         Linux/aarch64)
-            echo "cpu"
+            echo "cuda cpu"
             ;;
         Linux/x86_64)
-            echo "cuda-blackwell cuda rocm vulkan cpu"
+            echo "cuda rocm vulkan cpu"
             ;;
         *)
                 platform_error_message >&2
@@ -277,8 +289,7 @@ supported_flavors() {
     esac
 }
 
-# Keep this detection order and the probes above in sync with the Rust updater
-# flavor selection in crates/mesh-llm-system/src/autoupdate.rs.
+# Keep this detection order and the probes above (probe_nvidia, probe_rocm, probe_vulkan, probe_tegra) in sync with the Rust updater flavor selection in crates/mesh-llm-system/src/autoupdate.rs.
 recommended_flavor() {
     case "$(platform_support_status)" in
         supported)
@@ -287,12 +298,14 @@ recommended_flavor() {
             echo "metal"
             ;;
         Linux/aarch64)
-            echo "cpu"
+            if probe_nvidia; then
+                echo "cuda"
+            else
+                echo "cpu"
+            fi
             ;;
         Linux/x86_64)
-            if probe_cuda_blackwell; then
-                echo "cuda-blackwell"
-            elif probe_nvidia; then
+            if probe_nvidia; then
                 echo "cuda"
             elif probe_rocm; then
                 echo "rocm"
@@ -321,11 +334,13 @@ recommendation_reason() {
             echo "Apple Silicon host detected."
             ;;
         cuda)
-            echo "NVIDIA tooling or devices were detected."
+            if probe_tegra; then
+                echo "NVIDIA Tegra/Jetson SoC detected (Orin AGX, Orin NX, Xavier, etc.)."
+            else
+                echo "NVIDIA tooling or devices were detected."
+            fi
             ;;
-        cuda-blackwell)
-            echo "Blackwell NVIDIA hardware was detected."
-            ;;
+
         rocm)
             echo "ROCm/HIP tooling was detected."
             ;;
@@ -407,6 +422,34 @@ choose_flavor() {
     echo "$reply"
 }
 
+detect_cuda_major() {
+    # Detect host CUDA major version from nvcc or libcudart.
+    # Only return versions we publish artifacts for (12, 13).
+    local ver=""
+    if command -v nvcc >/dev/null 2>&1; then
+        ver="$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+')"
+    fi
+    if [[ -z "$ver" ]]; then
+        # Try to find libcudart.so and extract version from filename.
+        local lib
+        for lib in /usr/local/cuda*/targets/*/lib/libcudart.so.* /usr/local/cuda*/targets/*/lib/stubs/libcudart.so.*; do
+            if [[ -f "$lib" ]]; then
+                ver="$(basename "$lib" | grep -oP 'libcudart\.so\.\K[0-9]+' | head -n 1)"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$ver" ]]; then
+        # Fallback: check ldconfig for libcudart.
+        ver="$(ldconfig -p 2>/dev/null | grep -oP 'libcudart\.so\.\K[0-9]+' | sort -rn | head -n 1)"
+    fi
+    # Only return versions we publish artifacts for (12, 13).
+    case "$ver" in
+        12|13) echo "$ver" ;;
+        *)     echo "" ;;
+    esac
+}
+
 asset_name() {
     local flavor="$1"
     case "$(platform_support_status)" in
@@ -416,13 +459,34 @@ asset_name() {
             echo "mesh-llm-aarch64-apple-darwin.tar.gz"
             ;;
         Linux/aarch64)
-            echo "mesh-llm-aarch64-unknown-linux-gnu.tar.gz"
+            case "$flavor" in
+                cpu) echo "mesh-llm-aarch64-unknown-linux-gnu.tar.gz" ;;
+                cuda)
+                    local cuda_major="$(detect_cuda_major)"
+                    if [[ -n "$cuda_major" ]]; then
+                        echo "mesh-llm-aarch64-unknown-linux-gnu-cuda-${cuda_major}.tar.gz"
+                    else
+                        # Fallback: try to match any cuda artifact.
+                        echo "mesh-llm-aarch64-unknown-linux-gnu-cuda.tar.gz"
+                    fi
+                    ;;
+                *)
+                    echo "error: unsupported aarch64 flavor '$flavor'" >&2
+                    exit 1
+                    ;;
+            esac
             ;;
         Linux/x86_64)
             case "$flavor" in
                 cpu) echo "mesh-llm-x86_64-unknown-linux-gnu.tar.gz" ;;
-                cuda) echo "mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz" ;;
-                cuda-blackwell) echo "mesh-llm-x86_64-unknown-linux-gnu-cuda-blackwell.tar.gz" ;;
+                cuda)
+                    local cuda_major="$(detect_cuda_major)"
+                    if [[ -n "$cuda_major" ]]; then
+                        echo "mesh-llm-x86_64-unknown-linux-gnu-cuda-${cuda_major}.tar.gz"
+                    else
+                        echo "mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz"
+                    fi
+                    ;;
                 rocm) echo "mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz" ;;
                 vulkan) echo "mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz" ;;
                 *)

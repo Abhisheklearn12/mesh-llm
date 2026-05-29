@@ -47,7 +47,6 @@ struct UpdateTarget {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct HostBackendProbe {
-    cuda_blackwell: bool,
     cuda: bool,
     rocm: bool,
     vulkan: bool,
@@ -431,10 +430,16 @@ fn release_asset_candidates(
     match preference {
         ReleaseAssetPreference::StableFirst => {
             push_release_asset_candidate(&mut candidates, target.stable_asset_name());
+            for name in target.stable_cuda_versioned_names() {
+                push_release_asset_candidate(&mut candidates, Some(name));
+            }
             push_release_asset_candidate(&mut candidates, target.versioned_asset_name(release_tag));
         }
         ReleaseAssetPreference::VersionedFirst => {
             push_release_asset_candidate(&mut candidates, target.versioned_asset_name(release_tag));
+            for name in target.stable_cuda_versioned_names() {
+                push_release_asset_candidate(&mut candidates, Some(name));
+            }
             push_release_asset_candidate(&mut candidates, target.stable_asset_name());
         }
     }
@@ -497,8 +502,7 @@ fn preferred_bundle_flavor_for_platform(
     probe: HostBackendProbe,
 ) -> Option<backend::BinaryFlavor> {
     // Keep this detection order and the probes below in sync with install.sh.
-    const UPDATE_FLAVOR_PREFERENCE: [backend::BinaryFlavor; 6] = [
-        backend::BinaryFlavor::CudaBlackwell,
+    const UPDATE_FLAVOR_PREFERENCE: [backend::BinaryFlavor; 5] = [
         backend::BinaryFlavor::Cuda,
         backend::BinaryFlavor::Rocm,
         backend::BinaryFlavor::Vulkan,
@@ -525,7 +529,6 @@ fn flavor_supported_for_update(
     }
 
     match flavor {
-        backend::BinaryFlavor::CudaBlackwell => probe.cuda_blackwell,
         backend::BinaryFlavor::Cuda => probe.cuda,
         backend::BinaryFlavor::Rocm => probe.rocm,
         backend::BinaryFlavor::Vulkan => probe.vulkan,
@@ -536,7 +539,6 @@ fn flavor_supported_for_update(
 
 fn current_host_backend_probe() -> HostBackendProbe {
     HostBackendProbe {
-        cuda_blackwell: probe_cuda_blackwell_backend(),
         cuda: probe_nvidia_backend(),
         rocm: probe_rocm_backend(),
         vulkan: probe_vulkan_backend(),
@@ -544,41 +546,19 @@ fn current_host_backend_probe() -> HostBackendProbe {
     }
 }
 
-fn probe_cuda_blackwell_backend() -> bool {
-    nvidia_compute_caps()
-        .iter()
-        .any(|capability| is_blackwell_compute_capability(capability))
-        || nvidia_proc_models()
-            .iter()
-            .any(|model| is_blackwell_nvidia_model(model))
-}
-
 fn probe_nvidia_backend() -> bool {
     command_exists("nvidia-smi")
         || command_exists("nvcc")
         || Path::new("/dev/nvidiactl").exists()
         || Path::new("/proc/driver/nvidia/gpus").is_dir()
+        || Path::new("/dev/nvhost-gpu").exists()
+        || Path::new("/dev/nvhost-ctrl-gpu").exists()
+        || nvidia_device_tree_models()
+            .iter()
+            .any(|model| is_tegra_nvidia_model(model))
 }
 
-fn nvidia_compute_caps() -> Vec<String> {
-    let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
+#[cfg(test)]
 fn is_blackwell_compute_capability(capability: &str) -> bool {
     let normalized = capability
         .chars()
@@ -589,26 +569,35 @@ fn is_blackwell_compute_capability(capability: &str) -> bool {
         .is_ok_and(|sm| (100..200).contains(&sm))
 }
 
-fn nvidia_proc_models() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir("/proc/driver/nvidia/gpus") else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join("information"))
-        .filter_map(|path| std::fs::read_to_string(path).ok())
-        .filter_map(|contents| {
-            contents.lines().find_map(|line| {
-                line.strip_prefix("Model:")
-                    .map(str::trim)
-                    .filter(|model| !model.is_empty())
-                    .map(ToString::to_string)
-            })
-        })
-        .collect()
+fn nvidia_device_tree_models() -> Vec<String> {
+    [
+        "/proc/device-tree/model",
+        "/proc/device-tree/compatible",
+        "/sys/firmware/devicetree/base/model",
+        "/sys/firmware/devicetree/base/compatible",
+    ]
+    .iter()
+    .filter_map(|path| std::fs::read(path).ok())
+    .map(|bytes| {
+        String::from_utf8_lossy(&bytes)
+            .replace('\0', "\n")
+            .trim()
+            .to_string()
+    })
+    .filter(|model| !model.is_empty())
+    .collect()
 }
 
+fn is_tegra_nvidia_model(model: &str) -> bool {
+    const TEGRA_MODEL_MARKERS: [&str; 5] = ["JETSON", "TEGRA", "ORIN", "NVGPU", "THOR"];
+
+    let upper = model.to_ascii_uppercase();
+    TEGRA_MODEL_MARKERS
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
+
+#[cfg(test)]
 fn is_blackwell_nvidia_model(model: &str) -> bool {
     const BLACKWELL_MODEL_MARKERS: [&str; 14] = [
         "BLACKWELL",
@@ -1816,19 +1805,6 @@ mod tests {
     #[test]
     fn test_update_flavor_preference_uses_backend_order() {
         let probe = HostBackendProbe {
-            cuda_blackwell: true,
-            cuda: true,
-            rocm: true,
-            vulkan: true,
-            metal: false,
-        };
-        assert_eq!(
-            preferred_bundle_flavor_for_platform("linux", "x86_64", probe),
-            Some(backend::BinaryFlavor::CudaBlackwell)
-        );
-
-        let probe = HostBackendProbe {
-            cuda_blackwell: false,
             cuda: true,
             rocm: true,
             vulkan: true,
@@ -1840,7 +1816,6 @@ mod tests {
         );
 
         let probe = HostBackendProbe {
-            cuda_blackwell: false,
             cuda: false,
             rocm: true,
             vulkan: true,
@@ -1852,7 +1827,6 @@ mod tests {
         );
 
         let probe = HostBackendProbe {
-            cuda_blackwell: false,
             cuda: false,
             rocm: false,
             vulkan: true,
@@ -1867,7 +1841,6 @@ mod tests {
     #[test]
     fn test_update_flavor_preference_filters_by_published_platform() {
         let probe = HostBackendProbe {
-            cuda_blackwell: true,
             cuda: true,
             rocm: true,
             vulkan: true,
@@ -1877,6 +1850,17 @@ mod tests {
             preferred_bundle_flavor_for_platform("macos", "aarch64", probe),
             Some(backend::BinaryFlavor::Metal)
         );
+        assert_eq!(
+            preferred_bundle_flavor_for_platform("linux", "aarch64", probe),
+            Some(backend::BinaryFlavor::Cuda)
+        );
+
+        let probe = HostBackendProbe {
+            cuda: false,
+            rocm: true,
+            vulkan: true,
+            metal: true,
+        };
         assert_eq!(
             preferred_bundle_flavor_for_platform("linux", "aarch64", probe),
             Some(backend::BinaryFlavor::Cpu)
@@ -1892,7 +1876,7 @@ mod tests {
         for capability in ["10.0", "10.3", "12.0", "12.1", "100", "103", "120", "121"] {
             assert!(
                 is_blackwell_compute_capability(capability),
-                "{capability} should select cuda-blackwell"
+                "{capability} requires CUDA 13.x"
             );
         }
         for capability in ["7.5", "8.0", "8.9", "9.0", "75", "80", "89", "90"] {
@@ -1914,13 +1898,31 @@ mod tests {
         ] {
             assert!(
                 is_blackwell_nvidia_model(model),
-                "{model} should select cuda-blackwell"
+                "{model} requires CUDA 13.x"
             );
         }
         for model in ["NVIDIA H100", "NVIDIA A100", "NVIDIA RTX 4090"] {
             assert!(
                 !is_blackwell_nvidia_model(model),
                 "{model} should select primary cuda"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tegra_nvidia_detection_from_model_name() {
+        for model in [
+            "NVIDIA Jetson AGX Orin",
+            "Orin (nvgpu)",
+            "nvidia,tegra234",
+            "Jetson Thor",
+        ] {
+            assert!(is_tegra_nvidia_model(model), "{model} should select cuda");
+        }
+        for model in ["Raspberry Pi 5", "Apple M4", "AMD Radeon"] {
+            assert!(
+                !is_tegra_nvidia_model(model),
+                "{model} should not select cuda"
             );
         }
     }
@@ -1962,5 +1964,77 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_positive_orin_agx() {
+        assert!(is_tegra_nvidia_model(
+            "NVIDIA Jetson AGX Orin Developer Kit"
+        ));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_positive_orin_nano() {
+        assert!(is_tegra_nvidia_model(
+            "NVIDIA Jetson Orin Nano Developer Kit"
+        ));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_positive_xavier() {
+        assert!(is_tegra_nvidia_model("NVIDIA Jetson Xavier NX"));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_positive_lowercase() {
+        assert!(is_tegra_nvidia_model("nvidia tegra234"));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_negative_raspberry_pi() {
+        assert!(!is_tegra_nvidia_model("Raspberry Pi 4 Model B Rev 1.5"));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_negative_amd() {
+        assert!(!is_tegra_nvidia_model("AMD EPYC Server"));
+    }
+
+    #[test]
+    fn test_is_tegra_nvidia_model_empty() {
+        assert!(!is_tegra_nvidia_model(""));
+    }
+
+    #[test]
+    fn test_tegra_selects_cuda_on_linux_aarch64() {
+        // Simulate a Tegra/Jetson probe: cuda=true (set by tegra), everything else false.
+        let probe = HostBackendProbe {
+            cuda: true,
+            rocm: false,
+            vulkan: false,
+            metal: false,
+        };
+        assert_eq!(
+            preferred_bundle_flavor_for_platform("linux", "aarch64", probe),
+            Some(backend::BinaryFlavor::Cuda),
+            "Tegra on Linux aarch64 must select CUDA bundle"
+        );
+    }
+
+    #[test]
+    fn test_tegra_falls_back_to_cpu_when_cuda_unsupported() {
+        // If the release has no CUDA asset for aarch64, CPU is the fallback.
+        let probe = HostBackendProbe {
+            cuda: true,
+            rocm: false,
+            vulkan: false,
+            metal: false,
+        };
+        // On armv7l (no published assets), even with cuda=true, there's nothing to match.
+        assert_eq!(
+            preferred_bundle_flavor_for_platform("linux", "armv7l", probe),
+            None,
+            "armv7l has no published assets regardless of backend"
+        );
     }
 }

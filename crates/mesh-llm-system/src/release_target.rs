@@ -114,13 +114,12 @@ impl ReleaseTarget {
             (CanonicalOs::Macos, CanonicalArch::Aarch64, BinaryFlavor::Metal)
             | (CanonicalOs::Linux, CanonicalArch::X86_64, BinaryFlavor::Cpu)
             | (CanonicalOs::Linux, CanonicalArch::X86_64, BinaryFlavor::Cuda)
-            | (CanonicalOs::Linux, CanonicalArch::X86_64, BinaryFlavor::CudaBlackwell)
             | (CanonicalOs::Linux, CanonicalArch::X86_64, BinaryFlavor::Rocm)
             | (CanonicalOs::Linux, CanonicalArch::X86_64, BinaryFlavor::Vulkan)
             | (CanonicalOs::Linux, CanonicalArch::Aarch64, BinaryFlavor::Cpu)
+            | (CanonicalOs::Linux, CanonicalArch::Aarch64, BinaryFlavor::Cuda)
             | (CanonicalOs::Windows, CanonicalArch::X86_64, BinaryFlavor::Cpu)
             | (CanonicalOs::Windows, CanonicalArch::X86_64, BinaryFlavor::Cuda)
-            | (CanonicalOs::Windows, CanonicalArch::X86_64, BinaryFlavor::CudaBlackwell)
             | (CanonicalOs::Windows, CanonicalArch::X86_64, BinaryFlavor::Rocm)
             | (CanonicalOs::Windows, CanonicalArch::X86_64, BinaryFlavor::Vulkan) => {
                 SupportStatus::Supported
@@ -156,6 +155,29 @@ impl ReleaseTarget {
         self.asset_name(Some(release_tag))
     }
 
+    /// Return CUDA-versioned asset names (e.g. `-cuda-12`, `-cuda-13`) for cuda flavors.
+    /// Returns empty vec for non-cuda flavors or unsupported targets.
+    pub fn stable_cuda_versioned_names(self) -> Vec<String> {
+        if self.support_status() != SupportStatus::Supported {
+            return Vec::new();
+        }
+
+        let triple = match self.target_triple() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let archive = self.archive_kind().extension();
+        let base_flavor = match self.flavor {
+            BinaryFlavor::Cuda => "cuda",
+            _ => return Vec::new(),
+        };
+
+        vec![
+            format!("mesh-llm-{triple}-{base_flavor}-12.{archive}"),
+            format!("mesh-llm-{triple}-{base_flavor}-13.{archive}"),
+        ]
+    }
+
     fn asset_name(self, release_tag: Option<&str>) -> Option<String> {
         if self.support_status() != SupportStatus::Supported {
             return None;
@@ -166,7 +188,6 @@ impl ReleaseTarget {
         let flavor_suffix = match self.flavor {
             BinaryFlavor::Cpu | BinaryFlavor::Metal => "",
             BinaryFlavor::Cuda => "-cuda",
-            BinaryFlavor::CudaBlackwell => "-cuda-blackwell",
             BinaryFlavor::Rocm => "-rocm",
             BinaryFlavor::Vulkan => "-vulkan",
         };
@@ -208,7 +229,6 @@ mod tests {
         match name {
             "cpu" => BinaryFlavor::Cpu,
             "cuda" => BinaryFlavor::Cuda,
-            "cuda-blackwell" => BinaryFlavor::CudaBlackwell,
             "rocm" => BinaryFlavor::Rocm,
             "vulkan" => BinaryFlavor::Vulkan,
             "metal" => BinaryFlavor::Metal,
@@ -284,6 +304,8 @@ mod tests {
     fn release_target_arm64_aliases_have_identical_linux_assets() {
         let arm64 = ReleaseTarget::from_raw("linux", "arm64", BinaryFlavor::Cpu).unwrap();
         let aarch64 = ReleaseTarget::from_raw("linux", "aarch64", BinaryFlavor::Cpu).unwrap();
+        let cuda_arm64 = ReleaseTarget::from_raw("linux", "arm64", BinaryFlavor::Cuda).unwrap();
+        let cuda_aarch64 = ReleaseTarget::from_raw("linux", "aarch64", BinaryFlavor::Cuda).unwrap();
 
         assert_eq!(arm64.support_status(), aarch64.support_status());
         assert_eq!(arm64.stable_asset_name(), aarch64.stable_asset_name());
@@ -295,6 +317,28 @@ mod tests {
             arm64.stable_asset_name(),
             Some("mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string())
         );
+        assert_eq!(cuda_arm64.support_status(), cuda_aarch64.support_status());
+        assert_eq!(
+            cuda_arm64.stable_asset_name(),
+            cuda_aarch64.stable_asset_name()
+        );
+        assert_eq!(
+            cuda_arm64.stable_asset_name(),
+            Some("mesh-llm-aarch64-unknown-linux-gnu-cuda.tar.gz".to_string())
+        );
+
+        // CUDA versioned names for matrix artifacts.
+        let cuda_names = cuda_aarch64.stable_cuda_versioned_names();
+        assert_eq!(
+            cuda_names,
+            vec![
+                "mesh-llm-aarch64-unknown-linux-gnu-cuda-12.tar.gz",
+                "mesh-llm-aarch64-unknown-linux-gnu-cuda-13.tar.gz",
+            ]
+        );
+
+        // Non-CUDA flavors return empty.
+        assert!(arm64.stable_cuda_versioned_names().is_empty());
     }
 
     #[test]
