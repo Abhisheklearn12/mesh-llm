@@ -12,6 +12,10 @@ on:
       cache_key_prefix:
         required: true
         type: string
+      release_tag:
+        required: false
+        default: ''
+        type: string
       runs_on:
         required: false
         default: '"ubuntu-24.04"'
@@ -33,6 +37,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Prepare dispatched release version
+        if: inputs.release_tag != ''
+        run: scripts/release-version.sh "${{ inputs.release_tag }}"
 
       - uses: actions/setup-python@v6
         with:
