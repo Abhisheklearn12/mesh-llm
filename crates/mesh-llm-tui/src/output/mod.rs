@@ -1,5 +1,4 @@
 use ansi_to_tui::IntoText as _;
-use anyhow::Error as AnyhowError;
 use chrono::{Local, SecondsFormat, Utc};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -36,6 +35,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
+
+mod fatal;
+pub use fatal::{emit_fatal_error, emit_fatal_panic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelProgressState {
@@ -8478,31 +8480,6 @@ fn classify_error_type(message: &str, context: Option<&str>) -> &'static str {
     } else {
         "runtime_error"
     }
-}
-
-fn build_fatal_error_event(err: &AnyhowError) -> OutputEvent {
-    let message = err.to_string();
-    let context = err
-        .chain()
-        .skip(1)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    OutputEvent::Fatal {
-        message,
-        context: (!context.is_empty()).then(|| context.join(": ")),
-    }
-}
-
-pub fn emit_fatal_error(err: &AnyhowError) -> io::Result<()> {
-    emit_event(build_fatal_error_event(err))
-}
-
-pub fn emit_fatal_panic(message: impl Into<String>, context: Option<String>) -> io::Result<()> {
-    let event = OutputEvent::Fatal {
-        message: message.into(),
-        context,
-    };
-    write_emergency_event(&event)
 }
 
 fn write_emergency_event(event: &OutputEvent) -> io::Result<()> {
