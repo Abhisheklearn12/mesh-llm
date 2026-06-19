@@ -169,7 +169,12 @@
 
     <div class="stage2-aperture-ring" aria-hidden="true"></div>
 
-    <div class="stage2-scrubber" aria-label="Stage 2 sequence scrubber">
+    <button class="stage2-debug-toggle" type="button" role="switch" aria-checked="false" aria-label="Toggle stage 2 timeline scrubber" hidden>
+      <span>Timeline</span>
+      <i aria-hidden="true"></i>
+    </button>
+
+    <div class="stage2-scrubber" aria-label="Stage 2 sequence scrubber" aria-hidden="true">
       <div class="stage2-scrubber-meta" aria-live="polite">
         <span class="stage2-phase-name">phase 1</span>
         <span class="stage2-phase-index">01 / 08</span>
@@ -179,7 +184,7 @@
         <span class="stage2-scrubber-majors"></span>
         <span class="stage2-scrubber-thumb"></span>
       </div>
-      <input class="stage2-scrubber-input" type="range" min="0" max="1000" value="0" aria-label="Stage 2 sequence position" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="0">
+      <input class="stage2-scrubber-input" type="range" min="0" max="1000" value="0" aria-label="Stage 2 sequence position" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="0" disabled tabindex="-1">
     </div>
   </div>
 </section>

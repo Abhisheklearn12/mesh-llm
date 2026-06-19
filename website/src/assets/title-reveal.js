@@ -67,6 +67,7 @@
 
   function queueReveal(title) {
     if (!title || title.classList.contains('is-title-revealed') || title.classList.contains('is-title-revealing')) return;
+    if (document.body.classList.contains('is-stage2-active')) return;
     if (revealTimers.has(title)) return;
 
     revealTimers.set(title, window.setTimeout(function () {
@@ -127,6 +128,11 @@
   }
 
   function revealVisibleHiddenTitles() {
+    if (document.body.classList.contains('is-stage2-active')) {
+      titles.forEach(cancelQueuedReveal);
+      return;
+    }
+
     titles.forEach(function (title) {
       if (title.classList.contains('is-title-revealed')) {
         cancelQueuedReveal(title);
