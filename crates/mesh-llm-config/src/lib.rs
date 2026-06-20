@@ -99,6 +99,55 @@ connect_timeout_secs = 0
     }
 
     #[test]
+    fn native_runtime_override_accepts_mesh_version_with_optional_abi_and_selection() {
+        let config = parse_config_toml(
+            r#"
+[runtime.native_runtime]
+mesh_version = "0.68.0"
+skippy_abi = "0.1.25"
+selection = "exact:meshllm-native-runtime-linux-x86_64-cuda12"
+"#,
+        )
+        .expect("native runtime selector should parse");
+
+        assert_eq!(
+            config.runtime.native_runtime.mesh_version.as_deref(),
+            Some("0.68.0")
+        );
+        assert_eq!(
+            config.runtime.native_runtime.skippy_abi.as_deref(),
+            Some("0.1.25")
+        );
+        assert_eq!(
+            config.runtime.native_runtime.selection.as_deref(),
+            Some("exact:meshllm-native-runtime-linux-x86_64-cuda12")
+        );
+
+        parse_config_toml(
+            r#"
+[runtime.native_runtime]
+mesh_version = "0.68.0"
+"#,
+        )
+        .expect("mesh-version-only native runtime selector should parse");
+
+        let err = parse_config_toml(
+            r#"
+[runtime.native_runtime]
+selection = "cuda12"
+"#,
+        )
+        .expect_err("partial native runtime selector should fail validation");
+
+        assert!(
+            err.to_string().contains(
+                "runtime.native_runtime override must set mesh_version when skippy_abi or selection is set"
+            ),
+            "unexpected validation error: {err}"
+        );
+    }
+
+    #[test]
     fn config_store_add_model_preserves_existing_fields() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("config.toml");
@@ -607,6 +656,7 @@ gpu_id = "pci:0000:65:00.0"
             ("OwnerControlConfig", 1),
             ("GpuConfig", 1),
             ("RuntimeConfig", 1),
+            ("NativeRuntimeConfig", 1),
             ("MeshRequirementsConfig", 1),
             ("ModelConfigEntry", 1),
             ("ModelFitConfig", 2),
@@ -628,6 +678,7 @@ gpu_id = "pci:0000:65:00.0"
             "MeshRequirementsConfig",
             "OwnerControlConfig",
             "RuntimeConfig",
+            "NativeRuntimeConfig",
             "TelemetryConfig",
             "TelemetryMetricsConfig",
             "ModelConfigDefaults",
