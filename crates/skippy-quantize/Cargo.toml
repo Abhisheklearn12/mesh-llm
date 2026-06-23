@@ -1,0 +1,23 @@
+[package]
+name = "skippy-quantize"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Resumable GGUF conversion and quantization CLI for Skippy workflows"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+readme = "README.md"
+publish = false
+
+[features]
+default = []
+dynamic-llama-quant = ["llama-quant-ffi/dynamic-runtime"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc = "0.2"
+llama-quant-ffi = { path = "../llama-quant-ffi" }
+serde.workspace = true
+serde_json.workspace = true
+skippy-ffi = { path = "../skippy-ffi" }

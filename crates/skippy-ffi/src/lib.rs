@@ -329,6 +329,146 @@ pub struct LogitBias {
     pub bias: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum LlamaFileType {
+    AllF32 = 0,
+    MostlyF16 = 1,
+    MostlyQ4_0 = 2,
+    MostlyQ4_1 = 3,
+    MostlyQ8_0 = 7,
+    MostlyQ5_0 = 8,
+    MostlyQ5_1 = 9,
+    MostlyQ2K = 10,
+    MostlyQ3KS = 11,
+    MostlyQ3KM = 12,
+    MostlyQ3KL = 13,
+    MostlyQ4KS = 14,
+    MostlyQ4KM = 15,
+    MostlyQ5KS = 16,
+    MostlyQ5KM = 17,
+    MostlyQ6K = 18,
+    MostlyIQ2XXS = 19,
+    MostlyIQ2XS = 20,
+    MostlyQ2KS = 21,
+    MostlyIQ3XS = 22,
+    MostlyIQ3XXS = 23,
+    MostlyIQ1S = 24,
+    MostlyIQ4NL = 25,
+    MostlyIQ3S = 26,
+    MostlyIQ3M = 27,
+    MostlyIQ2S = 28,
+    MostlyIQ2M = 29,
+    MostlyIQ4XS = 30,
+    MostlyIQ1M = 31,
+    MostlyBf16 = 32,
+    MostlyTQ1_0 = 36,
+    MostlyTQ2_0 = 37,
+    MostlyMxfp4Moe = 38,
+    MostlyNvfp4 = 39,
+    MostlyQ1_0 = 40,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum GgmlType {
+    F32 = 0,
+    F16 = 1,
+    Q4_0 = 2,
+    Q4_1 = 3,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2K = 10,
+    Q3K = 11,
+    Q4K = 12,
+    Q5K = 13,
+    Q6K = 14,
+    Q8K = 15,
+    IQ2XXS = 16,
+    IQ2XS = 17,
+    IQ3XXS = 18,
+    IQ1S = 19,
+    IQ4NL = 20,
+    IQ3S = 21,
+    IQ2S = 22,
+    IQ4XS = 23,
+    I8 = 24,
+    I16 = 25,
+    I32 = 26,
+    I64 = 27,
+    F64 = 28,
+    IQ1M = 29,
+    Bf16 = 30,
+    TQ1_0 = 34,
+    TQ2_0 = 35,
+    Mxfp4 = 39,
+    Nvfp4 = 40,
+    Q1_0 = 41,
+    Count = 42,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum LlamaModelKvOverrideType {
+    Int = 0,
+    Float = 1,
+    Bool = 2,
+    Str = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union LlamaModelKvOverrideValue {
+    pub val_i64: i64,
+    pub val_f64: f64,
+    pub val_bool: bool,
+    pub val_str: [c_char; 128],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LlamaModelKvOverride {
+    pub tag: LlamaModelKvOverrideType,
+    pub key: [c_char; 128],
+    pub value: LlamaModelKvOverrideValue,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LlamaModelTensorOverride {
+    pub pattern: *const c_char,
+    pub tensor_type: GgmlType,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LlamaModelImatrixData {
+    pub name: *const c_char,
+    pub data: *const f32,
+    pub size: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LlamaModelQuantizeParams {
+    pub nthread: i32,
+    pub ftype: LlamaFileType,
+    pub output_tensor_type: GgmlType,
+    pub token_embedding_type: GgmlType,
+    pub allow_requantize: bool,
+    pub quantize_output_tensor: bool,
+    pub only_copy: bool,
+    pub pure: bool,
+    pub keep_split: bool,
+    pub dry_run: bool,
+    pub imatrix: *const LlamaModelImatrixData,
+    pub kv_overrides: *const LlamaModelKvOverride,
+    pub tt_overrides: *const LlamaModelTensorOverride,
+    pub prune_layers: *const i32,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SamplingConfig {
@@ -575,6 +715,8 @@ mod dynamic {
     dynamic_symbols! {
         llama_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
         ggml_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
+        llama_model_quantize_default_params() -> LlamaModelQuantizeParams;
+        llama_model_quantize(fname_inp: *const c_char, fname_out: *const c_char, params: *const LlamaModelQuantizeParams) -> u32;
         skippy_error_free(error: *mut Error);
         skippy_backend_device_count(out_count: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_backend_device_at(index: usize, out_device: *mut BackendDevice, out_error: *mut *mut Error) -> Status;
@@ -626,9 +768,6 @@ mod dynamic {
         skippy_tokenize(model: *mut Model, text: *const c_char, add_special: bool, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_detokenize(model: *mut Model, tokens: *const i32, token_count: usize, output_text: *mut c_char, output_text_capacity: usize, out_text_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_token_is_eog(model: *mut Model, token_id: i32, out_is_eog: *mut bool, out_error: *mut *mut Error) -> Status;
-        skippy_apply_chat_template(model: *mut Model, messages: *const ChatMessage, message_count: usize, add_assistant: bool, override_enable_thinking: bool, enable_thinking: bool, output_text: *mut c_char, output_text_capacity: usize, out_text_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-        skippy_apply_chat_template_json(model: *mut Model, messages_json: *const c_char, tools_json: *const c_char, tool_choice_json: *const c_char, add_assistant: bool, override_enable_thinking: bool, enable_thinking: bool, parallel_tool_calls: bool, output_text: *mut c_char, output_text_capacity: usize, out_text_bytes: *mut usize, output_metadata_json: *mut c_char, output_metadata_json_capacity: usize, out_metadata_json_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
-        skippy_parse_chat_response_json(generated_text: *const c_char, metadata_json: *const c_char, is_partial: bool, output_message_json: *mut c_char, output_message_json_capacity: usize, out_message_json_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_model_info_open(path: *const c_char, out_info: *mut *mut ModelInfo, out_error: *mut *mut Error) -> Status;
         skippy_model_info_free(info: *mut ModelInfo, out_error: *mut *mut Error) -> Status;
         skippy_model_info_tensor_count(info: *mut ModelInfo, out_count: *mut usize, out_error: *mut *mut Error) -> Status;
@@ -682,6 +821,44 @@ mod dynamic {
         out_model: *mut *mut Model,
         out_error: *mut *mut Error,
     ) -> Status;
+    type SkippyApplyChatTemplateFn = unsafe extern "C" fn(
+        model: *mut Model,
+        messages: *const ChatMessage,
+        message_count: usize,
+        add_assistant: bool,
+        override_enable_thinking: bool,
+        enable_thinking: bool,
+        output_text: *mut c_char,
+        output_text_capacity: usize,
+        out_text_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+    type SkippyApplyChatTemplateJsonFn = unsafe extern "C" fn(
+        model: *mut Model,
+        messages_json: *const c_char,
+        tools_json: *const c_char,
+        tool_choice_json: *const c_char,
+        add_assistant: bool,
+        override_enable_thinking: bool,
+        enable_thinking: bool,
+        parallel_tool_calls: bool,
+        output_text: *mut c_char,
+        output_text_capacity: usize,
+        out_text_bytes: *mut usize,
+        output_metadata_json: *mut c_char,
+        output_metadata_json_capacity: usize,
+        out_metadata_json_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+    type SkippyParseChatResponseJsonFn = unsafe extern "C" fn(
+        generated_text: *const c_char,
+        metadata_json: *const c_char,
+        is_partial: bool,
+        output_message_json: *mut c_char,
+        output_message_json_capacity: usize,
+        out_message_json_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
 
     impl Symbols {
         fn lookup_optional<Sym>(&self, name: &[u8]) -> Option<Sym>
@@ -721,6 +898,131 @@ mod dynamic {
             )
         })
     }
+
+    fn skippy_apply_chat_template_fn() -> Option<SkippyApplyChatTemplateFn> {
+        static CACHE: OnceLock<Option<SkippyApplyChatTemplateFn>> = OnceLock::new();
+        *CACHE.get_or_init(|| {
+            symbols().lookup_optional::<SkippyApplyChatTemplateFn>(b"skippy_apply_chat_template\0")
+        })
+    }
+
+    fn skippy_apply_chat_template_json_fn() -> Option<SkippyApplyChatTemplateJsonFn> {
+        static CACHE: OnceLock<Option<SkippyApplyChatTemplateJsonFn>> = OnceLock::new();
+        *CACHE.get_or_init(|| {
+            symbols().lookup_optional::<SkippyApplyChatTemplateJsonFn>(
+                b"skippy_apply_chat_template_json\0",
+            )
+        })
+    }
+
+    fn skippy_parse_chat_response_json_fn() -> Option<SkippyParseChatResponseJsonFn> {
+        static CACHE: OnceLock<Option<SkippyParseChatResponseJsonFn>> = OnceLock::new();
+        *CACHE.get_or_init(|| {
+            symbols().lookup_optional::<SkippyParseChatResponseJsonFn>(
+                b"skippy_parse_chat_response_json\0",
+            )
+        })
+    }
+
+    #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+    pub unsafe fn skippy_apply_chat_template(
+        model: *mut Model,
+        messages: *const ChatMessage,
+        message_count: usize,
+        add_assistant: bool,
+        override_enable_thinking: bool,
+        enable_thinking: bool,
+        output_text: *mut c_char,
+        output_text_capacity: usize,
+        out_text_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status {
+        let Some(function) = skippy_apply_chat_template_fn() else {
+            return Status::Unsupported;
+        };
+        unsafe {
+            function(
+                model,
+                messages,
+                message_count,
+                add_assistant,
+                override_enable_thinking,
+                enable_thinking,
+                output_text,
+                output_text_capacity,
+                out_text_bytes,
+                out_error,
+            )
+        }
+    }
+
+    #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+    pub unsafe fn skippy_apply_chat_template_json(
+        model: *mut Model,
+        messages_json: *const c_char,
+        tools_json: *const c_char,
+        tool_choice_json: *const c_char,
+        add_assistant: bool,
+        override_enable_thinking: bool,
+        enable_thinking: bool,
+        parallel_tool_calls: bool,
+        output_text: *mut c_char,
+        output_text_capacity: usize,
+        out_text_bytes: *mut usize,
+        output_metadata_json: *mut c_char,
+        output_metadata_json_capacity: usize,
+        out_metadata_json_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status {
+        let Some(function) = skippy_apply_chat_template_json_fn() else {
+            return Status::Unsupported;
+        };
+        unsafe {
+            function(
+                model,
+                messages_json,
+                tools_json,
+                tool_choice_json,
+                add_assistant,
+                override_enable_thinking,
+                enable_thinking,
+                parallel_tool_calls,
+                output_text,
+                output_text_capacity,
+                out_text_bytes,
+                output_metadata_json,
+                output_metadata_json_capacity,
+                out_metadata_json_bytes,
+                out_error,
+            )
+        }
+    }
+
+    #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+    pub unsafe fn skippy_parse_chat_response_json(
+        generated_text: *const c_char,
+        metadata_json: *const c_char,
+        is_partial: bool,
+        output_message_json: *mut c_char,
+        output_message_json_capacity: usize,
+        out_message_json_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status {
+        let Some(function) = skippy_parse_chat_response_json_fn() else {
+            return Status::Unsupported;
+        };
+        unsafe {
+            function(
+                generated_text,
+                metadata_json,
+                is_partial,
+                output_message_json,
+                output_message_json_capacity,
+                out_message_json_bytes,
+                out_error,
+            )
+        }
+    }
 }
 
 #[cfg(feature = "dynamic-runtime")]
@@ -740,6 +1042,14 @@ unsafe extern "C" {
     pub fn llama_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
 
     pub fn ggml_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
+
+    pub fn llama_model_quantize_default_params() -> LlamaModelQuantizeParams;
+
+    pub fn llama_model_quantize(
+        fname_inp: *const c_char,
+        fname_out: *const c_char,
+        params: *const LlamaModelQuantizeParams,
+    ) -> u32;
 
     pub fn skippy_abi_features() -> u64;
 

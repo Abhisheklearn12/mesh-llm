@@ -58,8 +58,10 @@ WORKSPACE_MEMBERS=(
   "skippy-server"
   "metrics-server"
   "skippy-model-package"
+  "skippy-quantize"
   "model-package"
   "skippy-correctness"
+  "llama-quant-ffi"
   "llama-spec-bench"
   "skippy-bench"
   "skippy-prompt"
@@ -143,6 +145,7 @@ weights = {
     "model-package": 5,
     "skippy-bench": 4,
     "skippy-model-package": 4,
+    "skippy-quantize": 4,
     "openai-frontend": 4,
     "model-artifact": 4,
     "model-hf": 4,

@@ -207,6 +207,34 @@ metrics-server-build:
 skippy-wan-lab-build-bins:
     cargo build --release --locked -p skippy-server -p skippy-prompt -p metrics-server -p skippy-model-package
 
+# Build the resumable GGUF conversion/quantization replacement CLI.
+[unix]
+skippy-quantize-build:
+    just with-lld cargo build -p skippy-quantize
+
+[windows]
+skippy-quantize-build:
+    @just with-lld cargo build -p skippy-quantize
+
+# Build the release binary used in HF conversion/quantization job images.
+[unix]
+skippy-quantize-release-build:
+    just with-lld cargo build --release --locked -p skippy-quantize
+
+[windows]
+skippy-quantize-release-build:
+    @just with-lld cargo build --release --locked -p skippy-quantize
+
+# Build skippy-quantize as a standalone quantization binary with the pinned
+# llama.cpp quantization ABI linked into the executable.
+[unix]
+skippy-quantize-standalone-build backend="cpu":
+    LLAMA_STAGE_BACKEND="{{ backend }}" LLAMA_STAGE_LINK_MODE=static just with-lld cargo build -p skippy-quantize
+
+[unix]
+skippy-quantize-standalone-release-build backend="cpu":
+    LLAMA_STAGE_BACKEND="{{ backend }}" LLAMA_STAGE_LINK_MODE=static just with-lld cargo build --release --locked -p skippy-quantize
+
 # Generate a reproducible benchmark corpus for skippy bench tooling.
 bench-corpus tier="smoke" *ARGS="":
     scripts/generate-bench-corpus.py "{{ tier }}" {{ ARGS }}

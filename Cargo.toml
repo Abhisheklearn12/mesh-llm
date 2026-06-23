@@ -47,12 +47,14 @@ members = [
     "crates/skippy-server",
     "crates/metrics-server",
     "crates/skippy-model-package",
+    "crates/skippy-quantize",
     "crates/model-package",
     "crates/skippy-correctness",
     "crates/llama-spec-bench",
     "crates/skippy-bench",
     "crates/skippy-prompt",
     "crates/mesh-mixture-of-agents",
+    "crates/llama-quant-ffi",
     "tools/xtask",
 ]
 default-members = [
