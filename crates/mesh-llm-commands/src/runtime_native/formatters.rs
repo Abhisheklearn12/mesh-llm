@@ -24,6 +24,10 @@ pub(crate) struct AvailableRuntimeRow {
 
 #[derive(Serialize)]
 pub(crate) struct NativeRuntimeDoctorReport {
+    pub(crate) healthy: bool,
+    pub(crate) status: String,
+    pub(crate) blockers: Vec<String>,
+    pub(crate) recommendations: Vec<String>,
     pub(crate) running_mesh_version: String,
     pub(crate) selected_mesh_version: String,
     pub(crate) configured_skippy_abi: Option<String>,
@@ -270,13 +274,14 @@ fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
     println!("🩺 MeshLLM doctor");
     println!();
     println!("Native runtime:");
+    println!("  status: {}", report.status);
     println!("  running MeshLLM version: {}", report.running_mesh_version);
     println!(
         "  selected runtime version: {}",
         report.selected_mesh_version
     );
     if report.selected_mesh_version != report.running_mesh_version {
-        println!("  status: native runtime version is pinned by config");
+        println!("  version pin: native runtime version is pinned by config");
     }
     if let Some(skippy_abi) = &report.configured_skippy_abi {
         println!("  configured Skippy ABI: {skippy_abi}");
@@ -306,7 +311,6 @@ fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
         }
         None => {
             println!("  selected: none");
-            println!("  status: no native runtime installed for selected MeshLLM version");
         }
     }
     println!("  installed: {}", report.installed_count);
@@ -314,6 +318,20 @@ fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
         "  installed for selected version: {}",
         report.selected_version_installed_count
     );
+    if !report.blockers.is_empty() {
+        println!();
+        println!("Blockers:");
+        for blocker in &report.blockers {
+            println!("  - {blocker}");
+        }
+    }
+    if !report.recommendations.is_empty() {
+        println!();
+        println!("Recommended next steps:");
+        for recommendation in &report.recommendations {
+            println!("  - {recommendation}");
+        }
+    }
 }
 
 fn format_rejection(reason: &CandidateRejection) -> String {

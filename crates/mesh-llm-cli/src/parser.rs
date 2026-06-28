@@ -9,6 +9,10 @@ use crate::runtime::RuntimeCommand;
 use mesh_llm_events::LogFormat;
 use serde::Serialize;
 
+mod runtime_surface_help;
+
+pub use runtime_surface_help::runtime_surface_help;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum BinaryFlavor {
     #[default]

@@ -51,14 +51,43 @@ async fn run_cli_entrypoint() -> anyhow::Result<()> {
 
 fn maybe_print_binary_help_and_exit() {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.len() == 1 {
+    if binary_help_request(args.iter().cloned()) {
         mesh_llm_cli::Cli::command().print_help().ok();
+        std::process::exit(0);
+    }
+    if let Some(surface) = runtime_surface_help_request(args.iter().cloned()) {
+        print!("{}", mesh_llm_cli::parser::runtime_surface_help(surface));
         std::process::exit(0);
     }
     if args.iter().any(|arg| arg == "--help-advanced") {
         print_advanced_help();
         std::process::exit(0);
     }
+}
+
+fn binary_help_request<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let args: Vec<_> = args.into_iter().collect();
+    match args.as_slice() {
+        [_program] => true,
+        [_program, arg] => arg == "--help" || arg == "-h",
+        [_program, help, arg] => help == "help" && (arg == "--help" || arg == "-h"),
+        _ => false,
+    }
+}
+
+fn runtime_surface_help_request<I>(args: I) -> Option<mesh_llm_cli::RuntimeSurface>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let args: Vec<_> = args.into_iter().collect();
+    let help = args.last()?;
+    if help != "--help" && help != "-h" {
+        return None;
+    }
+    mesh_llm_cli::normalize_runtime_surface_args(args).explicit_surface
 }
 
 fn print_advanced_help() {
@@ -233,5 +262,62 @@ fn map_trust_policy(
         mesh_llm_cli::TrustPolicy::Allowlist => {
             mesh_llm_host_runtime::crypto::TrustPolicy::Allowlist
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_entrypoint_tests {
+    use std::ffi::OsString;
+
+    #[test]
+    fn runtime_surface_help_request_handles_serve_and_client_help() {
+        assert_eq!(
+            super::runtime_surface_help_request([
+                OsString::from("mesh-llm"),
+                OsString::from("serve"),
+                OsString::from("--help"),
+            ]),
+            Some(mesh_llm_cli::RuntimeSurface::Serve)
+        );
+        assert_eq!(
+            super::runtime_surface_help_request([
+                OsString::from("mesh-llm"),
+                OsString::from("client"),
+                OsString::from("-h"),
+            ]),
+            Some(mesh_llm_cli::RuntimeSurface::Client)
+        );
+    }
+
+    #[test]
+    fn runtime_surface_help_request_skips_leading_global_flags() {
+        assert_eq!(
+            super::runtime_surface_help_request([
+                OsString::from("mesh-llm"),
+                OsString::from("--log-format"),
+                OsString::from("json"),
+                OsString::from("serve"),
+                OsString::from("--help"),
+            ]),
+            Some(mesh_llm_cli::RuntimeSurface::Serve)
+        );
+        assert_eq!(
+            super::runtime_surface_help_request([
+                OsString::from("mesh-llm"),
+                OsString::from("--relay-auth=https://relay.example=token"),
+                OsString::from("client"),
+                OsString::from("-h"),
+            ]),
+            Some(mesh_llm_cli::RuntimeSurface::Client)
+        );
+    }
+
+    #[test]
+    fn binary_help_request_handles_help_help() {
+        assert!(super::binary_help_request([
+            OsString::from("mesh-llm"),
+            OsString::from("help"),
+            OsString::from("--help"),
+        ]));
     }
 }
