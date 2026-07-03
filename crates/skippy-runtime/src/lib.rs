@@ -1378,9 +1378,38 @@ impl ChatTemplateMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatReasoningFormat {
+    Auto,
+    None,
+    Deepseek,
+    DeepseekLegacy,
+    Hidden,
+}
+
+impl ChatReasoningFormat {
+    pub const fn parser_name(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Hidden => "auto",
+            Self::None => "none",
+            Self::Deepseek => "deepseek",
+            Self::DeepseekLegacy => "deepseek-legacy",
+        }
+    }
+
+    pub const fn parses_reasoning(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub const fn exposes_reasoning(self) -> bool {
+        !matches!(self, Self::None | Self::Hidden)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatTemplateOptions {
     pub add_assistant: bool,
     pub enable_thinking: Option<bool>,
+    pub reasoning_format: Option<ChatReasoningFormat>,
 }
 
 impl Default for ChatTemplateOptions {
@@ -1388,6 +1417,7 @@ impl Default for ChatTemplateOptions {
         Self {
             add_assistant: true,
             enable_thinking: None,
+            reasoning_format: None,
         }
     }
 }
@@ -1396,6 +1426,7 @@ impl Default for ChatTemplateOptions {
 pub struct ChatTemplateJsonOptions {
     pub add_assistant: bool,
     pub enable_thinking: Option<bool>,
+    pub reasoning_format: Option<ChatReasoningFormat>,
     pub tools_json: Option<String>,
     pub tool_choice_json: Option<String>,
     pub parallel_tool_calls: bool,
@@ -1406,6 +1437,7 @@ impl Default for ChatTemplateJsonOptions {
         Self {
             add_assistant: true,
             enable_thinking: None,
+            reasoning_format: None,
             tools_json: None,
             tool_choice_json: None,
             parallel_tool_calls: true,
@@ -2333,6 +2365,7 @@ impl StageModel {
             ChatTemplateOptions {
                 add_assistant,
                 enable_thinking: None,
+                reasoning_format: None,
             },
         )
     }
@@ -2435,6 +2468,16 @@ impl StageModel {
             .as_ref()
             .map(|value| value.as_ptr())
             .unwrap_or(ptr::null());
+        let reasoning_format = options
+            .reasoning_format
+            .map(ChatReasoningFormat::parser_name)
+            .map(CString::new)
+            .transpose()
+            .context("reasoning format contains an interior NUL byte")?;
+        let reasoning_format_ptr = reasoning_format
+            .as_ref()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null());
 
         let mut prompt_bytes = 0usize;
         let mut metadata_bytes = 0usize;
@@ -2449,6 +2492,7 @@ impl StageModel {
                 options.enable_thinking.is_some(),
                 options.enable_thinking.unwrap_or(true),
                 options.parallel_tool_calls,
+                reasoning_format_ptr,
                 ptr::null_mut(),
                 0,
                 &mut prompt_bytes,
@@ -2477,6 +2521,7 @@ impl StageModel {
                 options.enable_thinking.is_some(),
                 options.enable_thinking.unwrap_or(true),
                 options.parallel_tool_calls,
+                reasoning_format_ptr,
                 prompt.as_mut_ptr().cast(),
                 prompt.len(),
                 &mut prompt_bytes,
@@ -4125,14 +4170,14 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        ChatTemplateMessage, FlashAttentionType, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0,
-        LLAMA_SERVER_DEFAULT_N_BATCH, LLAMA_SERVER_DEFAULT_N_UBATCH, ModelInfo,
-        NativeLogAggregator, NativeLogEvent, RuntimeConfig, RuntimeLoadMode,
-        SKIPPY_UNIFIED_KV_DEFAULT_N_BATCH, SamplingConfig, StageModel, Status, TensorRole,
-        flush_native_log_writer, format_skippy_error, parse_cache_type, parse_layer_assign_index,
-        redirect_native_logs_to_file, register_filtered_native_logs, restore_native_logs,
-        set_filtered_native_logs_enabled, unregister_filtered_native_logs, write_native_log,
-        write_native_log_note,
+        ChatReasoningFormat, ChatTemplateJsonOptions, ChatTemplateMessage, FlashAttentionType,
+        GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, LLAMA_SERVER_DEFAULT_N_BATCH,
+        LLAMA_SERVER_DEFAULT_N_UBATCH, ModelInfo, NativeLogAggregator, NativeLogEvent,
+        RuntimeConfig, RuntimeLoadMode, SKIPPY_UNIFIED_KV_DEFAULT_N_BATCH, SamplingConfig,
+        StageModel, Status, TensorRole, flush_native_log_writer, format_skippy_error,
+        parse_cache_type, parse_layer_assign_index, redirect_native_logs_to_file,
+        register_filtered_native_logs, restore_native_logs, set_filtered_native_logs_enabled,
+        unregister_filtered_native_logs, write_native_log, write_native_log_note,
     };
     use std::{
         env,
@@ -4479,6 +4524,62 @@ mod tests {
         )?;
         assert!(prompt.contains("Template smoke prompt."));
         assert!(prompt.len() >= "Template smoke prompt.".len());
+        Ok(())
+    }
+
+    // Requires SKIPPY_CORRECTNESS_MODEL to point at a reasoning-capable model
+    // family whose chat parser extracts <think> blocks (e.g. Qwen3).
+    #[test]
+    fn chat_reasoning_markers_are_stripped_and_extracted_when_model_is_configured()
+    -> anyhow::Result<()> {
+        let Some(model_path) = correctness_model() else {
+            eprintln!("skipping chat reasoning smoke: SKIPPY_CORRECTNESS_MODEL is not set");
+            return Ok(());
+        };
+        let model = open_correctness_model(&model_path)?;
+        let rendered = model.apply_chat_template_json(
+            r#"[{"role":"user","content":"Say hi."}]"#,
+            ChatTemplateJsonOptions {
+                reasoning_format: Some(ChatReasoningFormat::Hidden),
+                ..ChatTemplateJsonOptions::default()
+            },
+        )?;
+        let metadata: Value = serde_json::from_str(&rendered.metadata_json)?;
+        assert_eq!(
+            metadata.get("reasoning_format").and_then(Value::as_str),
+            Some("auto"),
+        );
+
+        // The generation prompt may already open the thought block, in which
+        // case the model output continues inside it without the opening tag.
+        let generation_prompt = metadata
+            .get("generation_prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let generated = if generation_prompt.contains("<think>") {
+            "Consider the greeting.</think>Hi there!"
+        } else {
+            "<think>Consider the greeting.</think>Hi there!"
+        };
+        let parsed = model.parse_chat_response_json(generated, &rendered.metadata_json, false)?;
+        let message: Value = serde_json::from_str(&parsed)?;
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !content.contains("<think>") && !content.contains("</think>"),
+            "reasoning markers must be stripped from content: {content:?}"
+        );
+        assert!(
+            content.contains("Hi there!"),
+            "visible content must survive reasoning extraction: {content:?}"
+        );
+        assert_eq!(
+            message.get("reasoning_content").and_then(Value::as_str),
+            Some("Consider the greeting."),
+            "reasoning content must be extracted from the thought block"
+        );
         Ok(())
     }
 
