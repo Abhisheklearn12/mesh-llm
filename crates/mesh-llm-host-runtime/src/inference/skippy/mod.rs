@@ -3,6 +3,7 @@
 mod certification;
 mod deployment;
 mod family_policy;
+mod hash_cache;
 mod hooks;
 mod kv_cache;
 mod materialization;

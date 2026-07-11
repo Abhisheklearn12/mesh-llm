@@ -2,12 +2,15 @@ use std::{
     fs::File,
     io::{BufReader, Read},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skippy_runtime::package::PackageGenerationInfo;
+
+use super::hash_cache::{self, SidecarDigestCache};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
@@ -58,7 +61,8 @@ pub fn synthetic_direct_gguf_package(
     model_id: &str,
     model_path: &Path,
 ) -> Result<SkippyPackageIdentity> {
-    let source_files = direct_gguf_source_files(model_path)?;
+    let digest_cache = SidecarDigestCache::open_default();
+    let source_files = direct_gguf_source_files(model_path, digest_cache.as_ref())?;
 
     let source_model_path = source_files
         .first()
@@ -158,7 +162,10 @@ fn synthetic_manifest_sha256(input: SyntheticManifestInput<'_>) -> Result<String
     Ok(hex_lower(&Sha256::digest(bytes)))
 }
 
-fn direct_gguf_source_files(model_path: &Path) -> Result<Vec<SkippyPackageSourceFile>> {
+fn direct_gguf_source_files(
+    model_path: &Path,
+    digest_cache: Option<&SidecarDigestCache>,
+) -> Result<Vec<SkippyPackageSourceFile>> {
     let canonical = model_path
         .canonicalize()
         .with_context(|| format!("canonicalize GGUF path {}", model_path.display()))?;
@@ -166,7 +173,7 @@ fn direct_gguf_source_files(model_path: &Path) -> Result<Vec<SkippyPackageSource
         anyhow::bail!("GGUF path has no UTF-8 filename: {}", canonical.display());
     };
     let Some(shard) = model_ref::split_gguf_shard_info(file_name) else {
-        let file = source_file(&canonical)?;
+        let file = source_file(&canonical, digest_cache)?;
         return Ok(vec![file]);
     };
     anyhow::ensure!(
@@ -189,7 +196,7 @@ fn direct_gguf_source_files(model_path: &Path) -> Result<Vec<SkippyPackageSource
     for index in 1..=total {
         let shard_name = format!("{}-{index:05}-of-{:05}.gguf", shard.prefix, total);
         let path = parent.join(shard_name);
-        files.push(source_file(&path).with_context(|| {
+        files.push(source_file(&path, digest_cache).with_context(|| {
             format!(
                 "read split GGUF shard {index}/{total} for {}",
                 canonical.display()
@@ -199,7 +206,10 @@ fn direct_gguf_source_files(model_path: &Path) -> Result<Vec<SkippyPackageSource
     Ok(files)
 }
 
-fn source_file(path: &Path) -> Result<SkippyPackageSourceFile> {
+fn source_file(
+    path: &Path,
+    digest_cache: Option<&SidecarDigestCache>,
+) -> Result<SkippyPackageSourceFile> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("canonicalize GGUF source {}", path.display()))?;
@@ -211,12 +221,40 @@ fn source_file(path: &Path) -> Result<SkippyPackageSourceFile> {
         "GGUF source is not a file: {}",
         canonical.display()
     );
-    let sha256 = file_sha256(&canonical)?;
+    let sha256 = source_file_sha256(&canonical, &metadata, digest_cache)?;
     Ok(SkippyPackageSourceFile {
         path: canonical.clone(),
         bytes: metadata.len(),
         sha256,
     })
+}
+
+/// SHA-256 of a source file, served from the sidecar cache when the file's
+/// `(size, mtime)` is unchanged and recomputed (then cached) otherwise.
+fn source_file_sha256(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    digest_cache: Option<&SidecarDigestCache>,
+) -> Result<String> {
+    let mtime_nanos = hash_cache::file_mtime_nanos(metadata);
+    if let (Some(cache), Some(mtime_nanos)) = (digest_cache, mtime_nanos)
+        && let Some(sha256) = cache.lookup(path, metadata.len(), mtime_nanos)
+    {
+        tracing::debug!(path = %path.display(), "GGUF source sha256 cache hit");
+        return Ok(sha256);
+    }
+    let started = Instant::now();
+    let sha256 = file_sha256(path)?;
+    tracing::debug!(
+        path = %path.display(),
+        bytes = metadata.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "computed GGUF source sha256"
+    );
+    if let (Some(cache), Some(mtime_nanos)) = (digest_cache, mtime_nanos) {
+        cache.store(path, metadata.len(), mtime_nanos, &sha256);
+    }
+    Ok(sha256)
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
@@ -457,7 +495,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = direct_gguf_source_files(&first).unwrap();
+        let files = direct_gguf_source_files(&first, None).unwrap();
 
         assert_eq!(files.len(), 3);
         assert_eq!(
@@ -474,7 +512,9 @@ mod tests {
         let first = dir.path().join("Model-Q4_K_M-00001-of-00002.gguf");
         std::fs::write(&first, b"one").unwrap();
 
-        let error = direct_gguf_source_files(&first).unwrap_err().to_string();
+        let error = direct_gguf_source_files(&first, None)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("split GGUF shard 2/2"));
     }
@@ -485,9 +525,64 @@ mod tests {
         let second = dir.path().join("Model-Q4_K_M-00002-of-00002.gguf");
         std::fs::write(&second, b"two").unwrap();
 
-        let error = direct_gguf_source_files(&second).unwrap_err().to_string();
+        let error = direct_gguf_source_files(&second, None)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("first shard"));
+    }
+
+    #[test]
+    fn source_file_sha256_is_stable_and_content_sensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"content-a").unwrap();
+
+        let first = source_file(&path, None).unwrap();
+        let second = source_file(&path, None).unwrap();
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(first.sha256.len(), 64);
+        assert!(first.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+
+        std::fs::write(&path, b"content-b-longer").unwrap();
+        let changed = source_file(&path, None).unwrap();
+        assert_ne!(first.sha256, changed.sha256);
+    }
+
+    #[test]
+    fn source_file_reuses_cached_sha256_while_metadata_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"content").unwrap();
+        let cache = SidecarDigestCache::open_in(dir.path().join("hashes"));
+
+        let computed = source_file(&path, Some(&cache)).unwrap();
+
+        // A matching (size, mtime) record now exists; prove the second call
+        // serves it by making the cached value observably distinct.
+        let canonical = path.canonicalize().unwrap();
+        let metadata = canonical.metadata().unwrap();
+        let mtime_nanos = hash_cache::file_mtime_nanos(&metadata).unwrap();
+        cache.store(&canonical, metadata.len(), mtime_nanos, "cached-sha256");
+
+        let cached = source_file(&path, Some(&cache)).unwrap();
+        assert_eq!(cached.sha256, "cached-sha256");
+        assert_ne!(computed.sha256, cached.sha256);
+    }
+
+    #[test]
+    fn source_file_recomputes_when_size_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"content-a").unwrap();
+        let cache = SidecarDigestCache::open_in(dir.path().join("hashes"));
+
+        let first = source_file(&path, Some(&cache)).unwrap();
+
+        std::fs::write(&path, b"content-b-longer").unwrap();
+        let changed = source_file(&path, Some(&cache)).unwrap();
+        assert_ne!(first.sha256, changed.sha256);
+        assert_eq!(changed.sha256, file_sha256(&path).unwrap());
     }
 
     #[test]
