@@ -559,14 +559,16 @@ mod tests {
         let computed = source_file(&path, Some(&cache)).unwrap();
 
         // A matching (size, mtime) record now exists; prove the second call
-        // serves it by making the cached value observably distinct.
+        // serves it by making the cached value observably distinct while
+        // still shaped like a real SHA-256.
+        let distinct_sha256 = "f".repeat(64);
         let canonical = path.canonicalize().unwrap();
         let metadata = canonical.metadata().unwrap();
         let mtime_nanos = hash_cache::file_mtime_nanos(&metadata).unwrap();
-        cache.store(&canonical, metadata.len(), mtime_nanos, "cached-sha256");
+        cache.store(&canonical, metadata.len(), mtime_nanos, &distinct_sha256);
 
         let cached = source_file(&path, Some(&cache)).unwrap();
-        assert_eq!(cached.sha256, "cached-sha256");
+        assert_eq!(cached.sha256, distinct_sha256);
         assert_ne!(computed.sha256, cached.sha256);
     }
 

@@ -11,18 +11,21 @@
 //! that never leave Rust-side coordination (stage deduplication, cache keys,
 //! split topology planning), not a security boundary. A `(size, mtime)` match
 //! is treated as sufficient evidence that the content is unchanged. Every
-//! failure mode (unreadable entry, corrupt JSON, schema or algorithm
-//! mismatch, unwritable cache directory) degrades to recomputing the digest.
+//! failure mode (unreadable entry, corrupt JSON, schema, algorithm, or
+//! digest-format mismatch, unwritable cache directory) degrades to
+//! recomputing the digest. Non-UTF-8 paths and pre-epoch mtimes are simply
+//! not cached.
 //!
 //! Records live under a per-user cache directory (one file per source path)
 //! rather than the runtime root, because runtime directories are per-instance
 //! and may sit on tmpfs via `XDG_RUNTIME_DIR`, while digests stay valid across
-//! reboots. Writes go through a temp file and rename so concurrent processes
-//! never observe a torn record.
+//! reboots. Writes go through a uniquely named temp file and rename so
+//! concurrent processes and threads never observe a torn record.
 
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::UNIX_EPOCH,
 };
 
@@ -76,32 +79,43 @@ impl SidecarDigestCache {
     }
 
     /// Return the cached digest for `path` when the stored record matches the
-    /// file's current size and mtime. Any read, parse, or validation failure
-    /// is a miss.
+    /// file's current size and mtime and carries a well-formed digest. Any
+    /// read, parse, or validation failure is a miss. Non-UTF-8 paths are never
+    /// cached, so they always miss.
     pub(crate) fn lookup(&self, path: &Path, size: u64, mtime_nanos: u128) -> Option<String> {
-        let bytes = fs::read(self.entry_path(path)).ok()?;
+        let path_utf8 = path.to_str()?;
+        let bytes = fs::read(self.entry_path(path_utf8)).ok()?;
         let record: CachedFileDigest = serde_json::from_slice(&bytes).ok()?;
         let valid = record.version == CACHE_SCHEMA_VERSION
             && record.algo == CACHE_DIGEST_ALGO
-            && record.path == path.to_string_lossy()
+            && record.path == path_utf8
             && record.size == size
-            && record.mtime_nanos == mtime_nanos;
+            && record.mtime_nanos == mtime_nanos
+            && is_sha256_hex(&record.digest);
         valid.then_some(record.digest)
     }
 
     /// Persist a digest record for `path`. Best-effort: failures are logged at
     /// debug level and otherwise ignored so an unwritable cache directory can
-    /// never fail a model load.
+    /// never fail a model load. Non-UTF-8 paths are skipped because their
+    /// lossy string form could collide with a different path.
     pub(crate) fn store(&self, path: &Path, size: u64, mtime_nanos: u128, digest: &str) {
+        let Some(path_utf8) = path.to_str() else {
+            tracing::debug!(
+                path = %path.display(),
+                "skipping GGUF source digest cache entry for non-UTF-8 path"
+            );
+            return;
+        };
         let record = CachedFileDigest {
             version: CACHE_SCHEMA_VERSION,
             algo: CACHE_DIGEST_ALGO.to_string(),
-            path: path.to_string_lossy().to_string(),
+            path: path_utf8.to_string(),
             size,
             mtime_nanos,
             digest: digest.to_string(),
         };
-        if let Err(error) = self.write_record(path, &record) {
+        if let Err(error) = self.write_record(path_utf8, &record) {
             tracing::debug!(
                 path = %path.display(),
                 cache_dir = %self.dir.display(),
@@ -111,14 +125,18 @@ impl SidecarDigestCache {
         }
     }
 
-    fn write_record(&self, path: &Path, record: &CachedFileDigest) -> std::io::Result<()> {
+    fn write_record(&self, path_utf8: &str, record: &CachedFileDigest) -> std::io::Result<()> {
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         fs::create_dir_all(&self.dir)?;
         let bytes = serde_json::to_vec(record)?;
-        let entry = self.entry_path(path);
+        let entry = self.entry_path(path_utf8);
         // Write-then-rename keeps concurrent readers and writers safe: readers
-        // never see a partial record, and the last writer of identical content
-        // wins.
-        let tmp = entry.with_extension(format!("tmp.{}", std::process::id()));
+        // never see a partial record. The pid plus counter suffix keeps the
+        // temp path unique across processes and threads, so writers never
+        // interleave on the same temp file.
+        let unique = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = entry.with_extension(format!("tmp.{}.{unique}", std::process::id()));
         fs::write(&tmp, &bytes)?;
         if let Err(error) = fs::rename(&tmp, &entry) {
             let _ = fs::remove_file(&tmp);
@@ -129,10 +147,20 @@ impl SidecarDigestCache {
 
     /// One record file per source path, named by a digest of the path so
     /// arbitrary absolute paths map to flat, filesystem-safe names.
-    fn entry_path(&self, path: &Path) -> PathBuf {
-        let name = hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()));
+    fn entry_path(&self, path_utf8: &str) -> PathBuf {
+        let name = hex::encode(Sha256::digest(path_utf8.as_bytes()));
         self.dir.join(format!("{name}.json"))
     }
+}
+
+/// A well-formed SHA-256 digest as produced by this crate: exactly 64
+/// lowercase hexadecimal characters. Anything else in a record is treated as
+/// corruption and misses.
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Nanoseconds since the Unix epoch of the file's mtime, or `None` when the
@@ -153,16 +181,21 @@ mod tests {
         (dir, cache)
     }
 
+    /// A syntactically valid SHA-256 fixture built from one hex character.
+    fn digest_of(hex_char: char) -> String {
+        hex_char.to_string().repeat(64)
+    }
+
     #[test]
     fn lookup_returns_stored_digest_on_exact_match() {
         let (_dir, cache) = cache_in_tempdir();
         let path = Path::new("/models/model.gguf");
 
-        cache.store(path, 42, 1_700_000_000_000_000_000, "abc123");
+        cache.store(path, 42, 1_700_000_000_000_000_000, &digest_of('a'));
 
         assert_eq!(
             cache.lookup(path, 42, 1_700_000_000_000_000_000),
-            Some("abc123".to_string())
+            Some(digest_of('a'))
         );
     }
 
@@ -171,7 +204,7 @@ mod tests {
         let (_dir, cache) = cache_in_tempdir();
         let path = Path::new("/models/model.gguf");
 
-        cache.store(path, 42, 1_700_000_000_000_000_000, "abc123");
+        cache.store(path, 42, 1_700_000_000_000_000_000, &digest_of('a'));
 
         assert_eq!(cache.lookup(path, 43, 1_700_000_000_000_000_000), None);
         assert_eq!(cache.lookup(path, 42, 1_700_000_000_000_000_001), None);
@@ -181,7 +214,7 @@ mod tests {
     fn lookup_misses_for_different_path_with_same_metadata() {
         let (_dir, cache) = cache_in_tempdir();
 
-        cache.store(Path::new("/models/a.gguf"), 42, 1, "abc123");
+        cache.store(Path::new("/models/a.gguf"), 42, 1, &digest_of('a'));
 
         assert_eq!(cache.lookup(Path::new("/models/b.gguf"), 42, 1), None);
     }
@@ -191,8 +224,8 @@ mod tests {
         let (_dir, cache) = cache_in_tempdir();
         let path = Path::new("/models/model.gguf");
 
-        cache.store(path, 42, 1, "abc123");
-        fs::write(cache.entry_path(path), b"not json").unwrap();
+        cache.store(path, 42, 1, &digest_of('a'));
+        fs::write(cache.entry_path(path.to_str().unwrap()), b"not json").unwrap();
 
         assert_eq!(cache.lookup(path, 42, 1), None);
     }
@@ -201,16 +234,17 @@ mod tests {
     fn lookup_misses_on_schema_or_algo_mismatch() {
         let (_dir, cache) = cache_in_tempdir();
         let path = Path::new("/models/model.gguf");
+        let path_utf8 = path.to_str().unwrap();
 
         let stale = CachedFileDigest {
             version: CACHE_SCHEMA_VERSION + 1,
             algo: CACHE_DIGEST_ALGO.to_string(),
-            path: path.to_string_lossy().to_string(),
+            path: path_utf8.to_string(),
             size: 42,
             mtime_nanos: 1,
-            digest: "abc123".to_string(),
+            digest: digest_of('a'),
         };
-        cache.write_record(path, &stale).unwrap();
+        cache.write_record(path_utf8, &stale).unwrap();
         assert_eq!(cache.lookup(path, 42, 1), None);
 
         let wrong_algo = CachedFileDigest {
@@ -218,8 +252,28 @@ mod tests {
             algo: "xxh3-128".to_string(),
             ..stale
         };
-        cache.write_record(path, &wrong_algo).unwrap();
+        cache.write_record(path_utf8, &wrong_algo).unwrap();
         assert_eq!(cache.lookup(path, 42, 1), None);
+    }
+
+    #[test]
+    fn lookup_misses_on_malformed_digest() {
+        let (_dir, cache) = cache_in_tempdir();
+        let path = Path::new("/models/model.gguf");
+        let path_utf8 = path.to_str().unwrap();
+
+        for malformed in ["abc123", "", &digest_of('a')[..63], &"A".repeat(64)] {
+            let record = CachedFileDigest {
+                version: CACHE_SCHEMA_VERSION,
+                algo: CACHE_DIGEST_ALGO.to_string(),
+                path: path_utf8.to_string(),
+                size: 42,
+                mtime_nanos: 1,
+                digest: malformed.to_string(),
+            };
+            cache.write_record(path_utf8, &record).unwrap();
+            assert_eq!(cache.lookup(path, 42, 1), None, "accepted {malformed:?}");
+        }
     }
 
     #[test]
@@ -236,7 +290,7 @@ mod tests {
         // creation fails; store must swallow the error.
         let cache = SidecarDigestCache::open_in(file.path().to_path_buf());
 
-        cache.store(Path::new("/models/model.gguf"), 42, 1, "abc123");
+        cache.store(Path::new("/models/model.gguf"), 42, 1, &digest_of('a'));
 
         assert_eq!(cache.lookup(Path::new("/models/model.gguf"), 42, 1), None);
     }
@@ -246,11 +300,53 @@ mod tests {
         let (_dir, cache) = cache_in_tempdir();
         let path = Path::new("/models/model.gguf");
 
-        cache.store(path, 42, 1, "old");
-        cache.store(path, 42, 2, "new");
+        cache.store(path, 42, 1, &digest_of('a'));
+        cache.store(path, 42, 2, &digest_of('b'));
 
         assert_eq!(cache.lookup(path, 42, 1), None);
-        assert_eq!(cache.lookup(path, 42, 2), Some("new".to_string()));
+        assert_eq!(cache.lookup(path, 42, 2), Some(digest_of('b')));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_never_cached() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let (_dir, cache) = cache_in_tempdir();
+        // Two distinct invalid-byte paths whose lossy string forms collide.
+        let first = Path::new(OsStr::from_bytes(b"/models/\xffmodel.gguf"));
+        let second = Path::new(OsStr::from_bytes(b"/models/\xfemodel.gguf"));
+
+        cache.store(first, 42, 1, &digest_of('a'));
+
+        assert_eq!(cache.lookup(first, 42, 1), None);
+        assert_eq!(cache.lookup(second, 42, 1), None);
+        // Nothing was written at all for the non-UTF-8 path.
+        assert!(!cache.dir.exists());
+    }
+
+    #[test]
+    fn concurrent_stores_publish_one_intact_record() {
+        let (_dir, cache) = cache_in_tempdir();
+        let cache = std::sync::Arc::new(cache);
+        let path = Path::new("/models/model.gguf");
+        let digests: Vec<String> = "abcdef".chars().map(digest_of).collect();
+
+        std::thread::scope(|scope| {
+            for digest in &digests {
+                let cache = cache.clone();
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        cache.store(path, 42, 1, digest);
+                    }
+                });
+            }
+        });
+
+        // Whichever writer renamed last, the published record must be one of
+        // the stored digests, never torn or interleaved bytes.
+        let found = cache.lookup(path, 42, 1).unwrap();
+        assert!(digests.contains(&found), "torn record: {found:?}");
     }
 
     #[test]
