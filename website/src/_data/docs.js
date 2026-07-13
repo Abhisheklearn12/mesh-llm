@@ -70,6 +70,18 @@ export default [
     ]
   },
   {
+    title: "Architecture",
+    description: "Understand node roles, mesh routing, Skippy stages, model artifacts, and subsystem ownership.",
+    links: [
+      ["Architecture hub", "/docs/pages/architecture/"],
+      ["Mesh workflows", "/docs/pages/private-meshes/"],
+      ["Large-model splits", "/docs/pages/running-large-models/"],
+      ["Model package spec", "/docs/pages/model-package-spec/"],
+      ["Plugin architecture", "/docs/pages/plugin-architecture/"],
+      ["SDK embedding", "/docs/pages/sdk/"]
+    ]
+  },
+  {
     title: "Integrations",
     description: "Connect agent tools and OpenAI-compatible applications.",
     links: [
