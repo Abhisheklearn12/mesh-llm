@@ -1251,6 +1251,40 @@ fn emulated_output_partial_withholds_tool_calls_and_incomplete_line() {
 }
 
 #[test]
+fn emulated_output_partial_streams_single_line_prose() {
+    let request = tool_request();
+    let parsed = parse_emulated_chat_output("The capital is Canber", &request, true)
+        .expect("emulated parse");
+
+    assert!(parsed.tool_calls.is_none());
+    assert_eq!(parsed.content.as_deref(), Some("The capital is Canber"));
+}
+
+#[test]
+fn emulated_output_partial_withholds_possible_marker_suffix() {
+    let request = tool_request();
+    let parsed =
+        parse_emulated_chat_output("Let me check. TOOL_", &request, true).expect("emulated parse");
+
+    assert!(parsed.tool_calls.is_none());
+    assert_eq!(parsed.content.as_deref(), Some("Let me check."));
+}
+
+#[test]
+fn emulated_output_partial_ignores_marker_inside_completed_thinking() {
+    let request = tool_request();
+    let parsed = parse_emulated_chat_output(
+        "<think>TOOL_CALL {\"name\":\"lookup\"}</think>The answer is Syd",
+        &request,
+        true,
+    )
+    .expect("emulated parse");
+
+    assert!(parsed.tool_calls.is_none());
+    assert_eq!(parsed.content.as_deref(), Some("The answer is Syd"));
+}
+
+#[test]
 fn emulated_output_respects_allowed_tool_names() {
     let request = tool_request();
     // "search" is not an allowed tool for this request (only "lookup" is).
