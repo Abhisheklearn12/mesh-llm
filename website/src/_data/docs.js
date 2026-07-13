@@ -42,6 +42,17 @@ export default [
     ]
   },
   {
+    title: "SDKs",
+    description: "Embed mesh clients and local serving into Rust, Node.js, JVM/Android, and Swift apps.",
+    links: [
+      ["SDK overview", "/docs/pages/sdk/"],
+      ["Rust", "/docs/pages/sdk-rust/"],
+      ["Node.js & Electron", "/docs/pages/sdk-node/"],
+      ["Java / Kotlin / Android", "/docs/pages/sdk-kotlin/"],
+      ["Swift & Apple platforms", "/docs/pages/sdk-swift/"]
+    ]
+  },
+  {
     title: "Plugins",
     description: "Extend mesh-llm with managed plugin processes, MCP tools, and HTTP bindings.",
     links: [
