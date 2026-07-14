@@ -158,7 +158,12 @@ impl SidecarDigestCache {
         // interleave on the same temp file.
         let unique = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp = entry.with_extension(format!("tmp.{}.{unique}", std::process::id()));
-        fs::write(&tmp, &bytes)?;
+        // Remove the temp file on every failure path so failed writes (e.g. a
+        // full disk) cannot leak partially written temp files into the cache.
+        if let Err(error) = fs::write(&tmp, &bytes) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
         if let Err(error) = fs::rename(&tmp, &entry) {
             let _ = fs::remove_file(&tmp);
             return Err(error);
