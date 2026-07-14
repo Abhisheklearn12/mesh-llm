@@ -230,15 +230,16 @@ fn source_file(
 }
 
 /// SHA-256 of a source file, served from the sidecar cache when the file's
-/// `(size, mtime)` is unchanged and recomputed (then cached) otherwise.
+/// `(size, mtime, ctime)` is unchanged and recomputed (then cached) otherwise.
 fn source_file_sha256(
     path: &Path,
     metadata: &std::fs::Metadata,
     digest_cache: Option<&SidecarDigestCache>,
 ) -> Result<String> {
     let mtime_nanos = hash_cache::file_mtime_nanos(metadata);
+    let ctime_nanos = hash_cache::file_ctime_nanos(metadata);
     if let (Some(cache), Some(mtime_nanos)) = (digest_cache, mtime_nanos)
-        && let Some(sha256) = cache.lookup(path, metadata.len(), mtime_nanos)
+        && let Some(sha256) = cache.lookup(path, metadata.len(), mtime_nanos, ctime_nanos)
     {
         tracing::debug!(path = %path.display(), "GGUF source sha256 cache hit");
         return Ok(sha256);
@@ -252,7 +253,7 @@ fn source_file_sha256(
         "computed GGUF source sha256"
     );
     if let (Some(cache), Some(mtime_nanos)) = (digest_cache, mtime_nanos) {
-        cache.store(path, metadata.len(), mtime_nanos, &sha256);
+        cache.store(path, metadata.len(), mtime_nanos, ctime_nanos, &sha256);
     }
     Ok(sha256)
 }
@@ -558,18 +559,62 @@ mod tests {
 
         let computed = source_file(&path, Some(&cache)).unwrap();
 
-        // A matching (size, mtime) record now exists; prove the second call
-        // serves it by making the cached value observably distinct while
+        // A matching (size, mtime, ctime) record now exists; prove the second
+        // call serves it by making the cached value observably distinct while
         // still shaped like a real SHA-256.
         let distinct_sha256 = "f".repeat(64);
         let canonical = path.canonicalize().unwrap();
         let metadata = canonical.metadata().unwrap();
         let mtime_nanos = hash_cache::file_mtime_nanos(&metadata).unwrap();
-        cache.store(&canonical, metadata.len(), mtime_nanos, &distinct_sha256);
+        let ctime_nanos = hash_cache::file_ctime_nanos(&metadata);
+        cache.store(
+            &canonical,
+            metadata.len(),
+            mtime_nanos,
+            ctime_nanos,
+            &distinct_sha256,
+        );
 
         let cached = source_file(&path, Some(&cache)).unwrap();
         assert_eq!(cached.sha256, distinct_sha256);
         assert_ne!(computed.sha256, cached.sha256);
+    }
+
+    /// Regression test for the review concern on the sidecar cache: a GGUF
+    /// replaced with different same-size content while tooling restores its
+    /// mtime must not reuse the stale hash. The inode ctime moves on any
+    /// rewrite and cannot be restored from userspace, so the cache misses.
+    #[cfg(unix)]
+    #[test]
+    fn source_file_recomputes_when_same_size_content_replaced_with_restored_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"content-a").unwrap();
+        let cache = SidecarDigestCache::open_in(dir.path().join("hashes"));
+
+        let first = source_file(&path, Some(&cache)).unwrap();
+        let original_mtime = path.metadata().unwrap().modified().unwrap();
+
+        // Inode timestamps use a coarse clock; wait long enough that the
+        // rewrite lands on a later ctime tick than the original write.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Replace with different content of identical size, then restore the
+        // original mtime the way rsync/tar/cp --preserve style tooling does.
+        std::fs::write(&path, b"content-b").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        let metadata = path.metadata().unwrap();
+        assert_eq!(metadata.len(), first.bytes);
+        assert_eq!(metadata.modified().unwrap(), original_mtime);
+
+        let replaced = source_file(&path, Some(&cache)).unwrap();
+        assert_ne!(first.sha256, replaced.sha256);
+        assert_eq!(replaced.sha256, file_sha256(&path).unwrap());
     }
 
     #[test]
