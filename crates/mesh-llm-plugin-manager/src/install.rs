@@ -9,9 +9,11 @@ use crate::{
     catalog::PluginCatalog,
     github::{GitHubReleaseAsset, GitHubReleaseClient},
     select_plugin_asset,
-    source_ref::{GitHubPluginSource, PluginInstallRef, PluginVersion, parse_install_ref},
+    source_ref::{
+        GitHubPluginSource, PluginInstallRef, PluginVersion, is_valid_name, parse_install_ref,
+    },
     store::{InstalledPluginMetadata, PluginStore, default_store_root},
-    target::PluginTarget,
+    target::{ArchiveExt, PluginTarget},
 };
 
 pub const DEFAULT_CATALOG_URL: &str =
@@ -106,6 +108,76 @@ pub async fn install_plugin(
     let parsed = parse_install_ref(reference)?;
     let resolved = resolve_install_source(parsed, options, progress).await?;
     install_resolved_plugin(resolved, options, progress, None).await
+}
+
+pub fn install_plugin_archive(
+    name: &str,
+    version: &str,
+    archive_path: &std::path::Path,
+    options: &PluginInstallOptions,
+    progress: &mut impl PluginProgressReporter,
+) -> Result<InstallOutcome> {
+    if !is_valid_name(name) {
+        bail!(
+            "local plugin name must use lowercase ASCII letters, numbers, and single '-' separators"
+        );
+    }
+    if version.trim().is_empty() {
+        bail!("local plugin version cannot be empty");
+    }
+    let archive_path = archive_path
+        .canonicalize()
+        .with_context(|| format!("open local plugin archive {}", archive_path.display()))?;
+    let archive_ext = local_archive_ext(&archive_path)?;
+    let asset_name = archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("local plugin archive filename must be valid UTF-8")?
+        .to_string();
+
+    progress.report(PluginProgressEvent::Extracting {
+        asset: asset_name.clone(),
+    });
+    let store = PluginStore::new(&options.store_root);
+    let current = store.load_optional(name)?;
+    let extracted =
+        extract_plugin_archive(&archive_path, archive_ext, name, &options.install_root)?;
+    let metadata = InstalledPluginMetadata {
+        name: name.to_string(),
+        source_repository: format!("local:{}", archive_path.display()),
+        installed_version: version.to_string(),
+        target_triple: options.target.triple().to_string(),
+        downloaded_asset_name: asset_name,
+        install_path: extracted.install_path,
+        enabled: current.as_ref().map(|item| item.enabled).unwrap_or(true),
+        manifest: extracted.manifest,
+        last_protocol_version: current.as_ref().and_then(|item| item.last_protocol_version),
+        last_status: current.as_ref().and_then(|item| item.last_status.clone()),
+        last_error: None,
+    };
+    store.save(&metadata)?;
+    progress.report(PluginProgressEvent::Installed {
+        name: metadata.name.clone(),
+        version: metadata.installed_version.clone(),
+    });
+    Ok(InstallOutcome {
+        metadata,
+        changed: true,
+    })
+}
+
+fn local_archive_ext(path: &std::path::Path) -> Result<ArchiveExt> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("local plugin archive filename must be valid UTF-8")?;
+    if name.ends_with(".tar.gz") {
+        return Ok(ArchiveExt::TarGz);
+    }
+    if name.ends_with(".zip") {
+        return Ok(ArchiveExt::Zip);
+    }
+    bail!("local plugin archive must end in .tar.gz or .zip")
 }
 
 pub async fn update_plugin(
@@ -326,7 +398,10 @@ mod tests {
         InstalledPluginManifestMetadata, InstalledPluginNumericControl,
         InstalledPluginOptionsSource, InstalledPluginRestartScope, InstalledPluginSettingSchema,
         InstalledPluginTextFormat, InstalledPluginValueKind, InstalledPluginValueSchema,
-        InstalledPluginVisibility, SUPPORTED_PLUGIN_SCHEMA_VERSION,
+        InstalledPluginVisibility, InstalledPluginWebUiBundleMetadata,
+        InstalledPluginWebUiConfigSectionMetadata, InstalledPluginWebUiMetadata,
+        InstalledPluginWebUiPageMetadata, InstalledPluginWebUiValidation,
+        InstalledPluginWebUiValidationStatus, SUPPORTED_PLUGIN_SCHEMA_VERSION,
     };
 
     fn write_tar_gz(archive_path: &Path, plugin_name: &str, files: &[(&str, &[u8])]) -> Result<()> {
@@ -346,14 +421,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn install_plugin_schema_roundtrip() {
-        let temp = TempDir::new().unwrap();
-        let install_root = temp.path().join("installed");
-        let store_root = temp.path().join("store");
-        let archive_path = temp.path().join("demo.tar.gz");
-        let executable_name = format!("demo{}", std::env::consts::EXE_SUFFIX);
-        let packaged_manifest = serde_json::to_vec_pretty(&InstalledPluginManifestMetadata {
+    fn packaged_manifest_fixture() -> Vec<u8> {
+        serde_json::to_vec_pretty(&InstalledPluginManifestMetadata {
             config_schema: Some(InstalledPluginConfigSchema {
                 plugin_name: "demo".to_string(),
                 schema_version: SUPPORTED_PLUGIN_SCHEMA_VERSION,
@@ -466,8 +535,62 @@ mod tests {
                     },
                 ],
             }),
+            web_ui: Some(InstalledPluginWebUiMetadata {
+                pages: vec![InstalledPluginWebUiPageMetadata {
+                    id: "dashboard".to_string(),
+                    label: "Dashboard".to_string(),
+                    icon: None,
+                    route: "dashboard".to_string(),
+                    bundle_id: "main".to_string(),
+                    entry_script: "assets/main.js".to_string(),
+                }],
+                config_sections: vec![InstalledPluginWebUiConfigSectionMetadata {
+                    id: "settings".to_string(),
+                    title: "Settings".to_string(),
+                    entry_script: "assets/settings.js".to_string(),
+                    parent_tab: Some("integrations".to_string()),
+                    bundle_id: "main".to_string(),
+                }],
+                bundles: vec![InstalledPluginWebUiBundleMetadata {
+                    id: "main".to_string(),
+                    root_path: "web-ui".to_string(),
+                }],
+                asset_root: None,
+                validation: InstalledPluginWebUiValidation {
+                    status: InstalledPluginWebUiValidationStatus::Invalid,
+                    reason: None,
+                },
+            }),
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    fn assert_installed_web_ui(store: &PluginStore) {
+        let loaded = store.load("demo").unwrap();
+        let web_ui = loaded
+            .manifest
+            .as_ref()
+            .and_then(|manifest| manifest.web_ui.as_ref())
+            .expect("stored web UI metadata");
+        assert_eq!(web_ui.asset_root.as_deref(), Some(Path::new("web-ui")));
+        assert_eq!(
+            web_ui.validation.status,
+            InstalledPluginWebUiValidationStatus::Valid
+        );
+        assert_eq!(
+            loaded.web_ui_asset_root_path(),
+            Some(loaded.install_path.join("web-ui"))
+        );
+    }
+
+    #[test]
+    fn install_plugin_schema_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let install_root = temp.path().join("installed");
+        let store_root = temp.path().join("store");
+        let archive_path = temp.path().join("demo.tar.gz");
+        let executable_name = format!("demo{}", std::env::consts::EXE_SUFFIX);
+        let packaged_manifest = packaged_manifest_fixture();
         write_tar_gz(
             &archive_path,
             "demo",
@@ -475,6 +598,8 @@ mod tests {
                 ("plugin.toml", b"name = \"demo\""),
                 (executable_name.as_str(), b""),
                 ("plugin-manifest.json", packaged_manifest.as_slice()),
+                ("web-ui/assets/main.js", b"console.log('main')"),
+                ("web-ui/assets/settings.js", b"console.log('settings')"),
             ],
         )
         .unwrap();
@@ -549,5 +674,72 @@ mod tests {
                 .and_then(|behavior| behavior.text_format),
             Some(InstalledPluginTextFormat::Url)
         );
+        assert_installed_web_ui(&store);
+    }
+
+    #[test]
+    fn installs_local_archive_through_package_validation_boundary() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("demo-local.tar.gz");
+        let executable_name = format!("demo{}", std::env::consts::EXE_SUFFIX);
+        let manifest = serde_json::json!({
+            "web_ui": {
+                "pages": [{
+                    "id": "overview",
+                    "label": "Overview",
+                    "route": "overview",
+                    "bundle_id": "main",
+                    "entry_script": "app.js"
+                }],
+                "bundles": [{"id": "main", "root_path": "bundle"}]
+            }
+        })
+        .to_string();
+        write_tar_gz(
+            &archive_path,
+            "demo",
+            &[
+                ("plugin.toml", b"name = \"demo\""),
+                (&executable_name, b"executable"),
+                ("plugin-manifest.json", manifest.as_bytes()),
+                (
+                    "bundle/app.js",
+                    b"export const registerMeshPluginUi = () => ({ pages: {} });",
+                ),
+            ],
+        )
+        .unwrap();
+        let options = PluginInstallOptions {
+            store_root: temp.path().join("store"),
+            install_root: temp.path().join("installed"),
+            catalog_url: "unused".to_string(),
+            target: PluginTarget::current().unwrap(),
+        };
+        let mut events = Vec::new();
+
+        let outcome =
+            install_plugin_archive("demo", "0.1.0-dev", &archive_path, &options, &mut |event| {
+                events.push(event)
+            })
+            .unwrap();
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.metadata.installed_version, "0.1.0-dev");
+        assert!(outcome.metadata.source_repository.starts_with("local:"));
+        assert_eq!(
+            outcome
+                .metadata
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.web_ui.as_ref())
+                .map(|web_ui| web_ui.validation.status),
+            Some(InstalledPluginWebUiValidationStatus::Valid)
+        );
+        assert!(PluginStore::new(&options.store_root).load("demo").is_ok());
+        assert!(matches!(
+            events.last(),
+            Some(PluginProgressEvent::Installed { name, version })
+                if name == "demo" && version == "0.1.0-dev"
+        ));
     }
 }
