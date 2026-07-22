@@ -6,6 +6,8 @@ use mesh_llm_native_runtime::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
+mod rocm;
+
 pub fn host_runtime_profile() -> HostRuntimeProfile {
     let mut gpus = detect_gpus();
     apply_gpu_arch_overrides(&mut gpus);
@@ -321,7 +323,15 @@ fn detect_cuda_profile(gpus: &[HostGpuProfile]) -> Option<HostCudaProfile> {
 }
 
 fn detect_rocm_profile(gpus: &[HostGpuProfile]) -> Option<HostRocmProfile> {
+    detect_rocm_profile_with_arches(gpus, rocm::gpu_arches())
+}
+
+fn detect_rocm_profile_with_arches(
+    gpus: &[HostGpuProfile],
+    detected_arches: BTreeSet<String>,
+) -> Option<HostRocmProfile> {
     let mut gpu_arches = env_string_set("MESH_LLM_ROCM_GPU_ARCHES");
+    gpu_arches.extend(detected_arches);
     gpu_arches.extend(gpus.iter().filter_map(|gpu| gpu.rocm_gfx.clone()));
     let version = std::env::var("MESH_LLM_ROCM_VERSION").ok();
     let has_rocm_label = gpus.iter().any(|gpu| {
@@ -408,7 +418,6 @@ fn leading_major_version(value: &str) -> Option<u32> {
 
 fn gpu_labels() -> Vec<String> {
     let mut labels = Vec::new();
-    append_command_lines(&mut labels, "rocminfo", &[]);
     append_command_lines(&mut labels, "vulkaninfo", &["--summary"]);
     append_platform_gpu_labels(&mut labels);
     labels.sort();
@@ -688,6 +697,16 @@ mod tests {
             detected_native_runtime_flavors(&[profile("AMD Radeon PRO W7900")], None, None, None);
 
         assert!(flavors.contains(&NativeRuntimeBackendKind::Rocm));
+    }
+
+    #[test]
+    fn kfd_architecture_evidence_enables_rocm_without_inventory_synthesis() {
+        let _rocm_arches = EnvVarGuard::clear("MESH_LLM_ROCM_GPU_ARCHES");
+
+        let profile = detect_rocm_profile_with_arches(&[], BTreeSet::from(["gfx942".to_string()]))
+            .expect("KFD architecture should enable a ROCm runtime profile");
+
+        assert_eq!(profile.gpu_arches, BTreeSet::from(["gfx942".to_string()]));
     }
 
     #[test]
