@@ -208,6 +208,57 @@ Switches:
 - `--trust-policy <TRUST_POLICY>`: override peer ownership trust policy.
 - `--trust-owner <TRUST_OWNER>`: add trusted owner IDs on top of the local trust store.
 
+### Locked split topology
+
+Automatic split planning chooses nodes and layer boundaries from the capacity
+currently advertised by the mesh. For controlled lab benchmarks, use a
+topology lock so every host runs the same node order and layer ranges across
+repeated runs, branches, and binaries.
+
+Copy the same versioned JSON file to every serving host:
+
+```json
+{
+  "version": 1,
+  "model": "hf://meshllm/example-layers@immutable-revision",
+  "manifest_sha256": "<sha256 of model-package.json>",
+  "stages": [
+    {
+      "node": "micstudio.local",
+      "layer_start": 0,
+      "layer_end": 31
+    },
+    {
+      "node": "studio54-3.local",
+      "layer_start": 31,
+      "layer_end": 47
+    }
+  ]
+}
+```
+
+Then pass the lock with `--split` on every host:
+
+```bash
+mesh-llm serve \
+  --model hf://meshllm/example-layers@immutable-revision \
+  --split \
+  --split-topology-lock /path/to/topology-lock.json
+```
+
+The runtime verifies the resolved package and manifest digest, resolves each
+node selector uniquely, requires contiguous ranges covering the full model,
+and applies the normal context, KV-cache, headroom, and VRAM checks to those
+exact assignments. A node selector may be a full iroh endpoint ID or an
+advertised hostname. Ranges are half-open: `layer_start` is inclusive and
+`layer_end` is exclusive.
+
+The lock is fail-closed, not a placement hint. If the requested topology cannot
+be reproduced, startup fails. If an assigned stage is later lost, mesh-llm
+withdraws the route after the normal grace period instead of replanning or
+falling back to a local model. This prevents benchmark results from silently
+mixing different execution topologies.
+
 ### Speculative decoding overrides
 
 Advanced `serve` invocations can temporarily override a package or config-file

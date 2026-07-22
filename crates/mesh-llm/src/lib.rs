@@ -169,6 +169,7 @@ fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::Ru
         no_draft: cli.no_draft,
         speculative_overrides,
         split: cli.split,
+        split_topology_lock: cli.split_topology_lock,
         ctx_size: cli.ctx_size,
         max_vram: cli.max_vram,
         no_enumerate_host: cli.no_enumerate_host,

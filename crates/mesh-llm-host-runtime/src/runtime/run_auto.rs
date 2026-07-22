@@ -995,6 +995,7 @@ pub(super) async fn spawn_run_auto_startup_model_tasks(
         n_ubatch: primary_n_ubatch,
         flash_attention: primary_flash_attention,
         parallel_override: primary_parallel_override,
+        split_topology_lock: options.split_topology_lock.clone(),
         resource_planning_profile,
         openai_guardrail_policy: runtime_state.openai_guardrail_policy.clone(),
         split: options.split,

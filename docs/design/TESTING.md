@@ -357,7 +357,9 @@ mesh-llm serve \
 >
 > Use real flags only: `--split`, `--max-vram`, `--join`, `--bind-port`,
 > `--port`, `--console`. There is no `--layer-range` flag — layer placement
-> is decided by the runtime from advertised VRAM, not pinned by CLI.
+> is normally decided by the runtime from advertised VRAM. Maintainer runs that
+> require exact placement can supply a complete topology manifest with
+> `--split-topology-lock <path>`; see `docs/SKIPPY_SPLITS.md`.
 
 #### Multi-interface Docker/Linux bind-IP validation
 

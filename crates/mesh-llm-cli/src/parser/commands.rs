@@ -620,6 +620,10 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub split: bool,
 
+    /// Pin split-serving node order and layer ranges from a JSON topology lock.
+    #[arg(long, value_name = "PATH", requires = "split", hide = true)]
+    pub split_topology_lock: Option<PathBuf>,
+
     /// Override context size (tokens). Default: auto-scaled to available VRAM.
     #[arg(long, hide = true)]
     pub ctx_size: Option<u32>,
